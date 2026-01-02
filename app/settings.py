@@ -15,12 +15,17 @@ class Settings(BaseSettings):
     MIN_LIQUIDITY: float = 1000.0
     MIN_VOLUME_24H: float = 1000.0
     MOVE_THRESHOLD: float = 0.05
+    MIN_PRICE_THRESHOLD: float = 0.02
+    MIN_ABS_MOVE: float = 0.01
+    FLOOR_PRICE: float = 0.05
     WINDOW_MINUTES: int = 60
     ALERT_COOLDOWN_MINUTES: int = 30
 
     TELEGRAM_BOT_TOKEN: str | None = None
     TELEGRAM_CHAT_ID: str | None = None
     TELEGRAM_THROTTLE_SECONDS: int = 900
+    TELEGRAM_MAX_ALERTS: int = 7
+    TELEGRAM_STRONG_MOVE_PCT: float = 0.15
 
     DEFAULT_TENANT_ID: str = "default"
     RATE_LIMIT_DEFAULT_PER_MIN: int = 60

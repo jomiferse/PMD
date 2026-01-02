@@ -12,6 +12,9 @@ def compute_dislocation_alerts(
     snapshots: list[dict],
     window_minutes: int,
     move_threshold: float,
+    min_price_threshold: float,
+    min_abs_move: float,
+    floor_price: float,
     min_liquidity: float,
     min_volume_24h: float,
     cooldown_minutes: int,
@@ -29,8 +32,10 @@ def compute_dislocation_alerts(
     seen_market_ids: set[str] = set()
 
     for snap in snapshots:
+        # Skip illiquid markets to avoid noisy, low-signal moves.
         if snap["liquidity"] < min_liquidity:
             continue
+        # Require minimum trading activity for meaningful alerts.
         if snap["volume_24h"] < min_volume_24h:
             continue
         if snap["market_id"] in seen_market_ids:
@@ -52,7 +57,22 @@ def compute_dislocation_alerts(
         if prev.market_p_yes <= 0:
             continue
 
-        delta_pct = abs(snap["market_p_yes"] - prev.market_p_yes) / prev.market_p_yes
+        old_price = prev.market_p_yes
+        new_price = snap["market_p_yes"]
+        # Skip unchanged prices so % math can't create phantom moves.
+        if old_price == new_price:
+            continue
+        # Avoid micro-priced markets where % moves are misleading.
+        if old_price < min_price_threshold and new_price < min_price_threshold:
+            continue
+
+        abs_move = abs(new_price - old_price)
+        # Require a real absolute move to filter out tiny jitter.
+        if abs_move < min_abs_move:
+            continue
+
+        # Use a floor to prevent % explosions on tiny bases.
+        delta_pct = abs_move / max(old_price, floor_price)
         if delta_pct < move_threshold:
             continue
 
@@ -80,10 +100,10 @@ def compute_dislocation_alerts(
                 title=snap["title"],
                 category=snap["category"],
                 move=delta_pct,
-                market_p_yes=snap["market_p_yes"],
-                prev_market_p_yes=prev.market_p_yes,
-                old_price=prev.market_p_yes,
-                new_price=snap["market_p_yes"],
+                market_p_yes=new_price,
+                prev_market_p_yes=old_price,
+                old_price=old_price,
+                new_price=new_price,
                 delta_pct=delta_pct,
                 liquidity=snap["liquidity"],
                 volume_24h=snap["volume_24h"],
