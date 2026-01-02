@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     MIN_VOLUME_24H: float = 1000.0
     MOVE_THRESHOLD: float = 0.05
     WINDOW_MINUTES: int = 60
+    ALERT_COOLDOWN_MINUTES: int = 30
 
     TELEGRAM_BOT_TOKEN: str | None = None
     TELEGRAM_CHAT_ID: str | None = None

@@ -4,6 +4,7 @@ import redis
 from fastapi import Depends, FastAPI
 from rq import Queue
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from .db import get_db
 from .jobs.run import job_sync_wrapper
@@ -93,12 +94,16 @@ def alerts_latest(
             "title": r.title,
             "category": r.category,
             "move": r.move,
+            "delta_pct": r.delta_pct,
             "market_p_yes": r.market_p_yes,
             "prev_market_p_yes": r.prev_market_p_yes,
+            "old_price": r.old_price,
+            "new_price": r.new_price,
             "liquidity": r.liquidity,
             "volume_24h": r.volume_24h,
             "snapshot_bucket": r.snapshot_bucket.isoformat(),
             "source_ts": r.source_ts.isoformat() if r.source_ts else None,
+            "triggered_at": r.triggered_at.isoformat() if r.triggered_at else None,
             "created_at": r.created_at.isoformat(),
             "message": r.message,
         }
@@ -128,15 +133,30 @@ def status(db: Session = Depends(get_db), api_key=Depends(rate_limit)):
     last_ingest_ts = redis_conn.get("ingest:last_ts")
     last_ingest_result = redis_conn.get("ingest:last_result")
     queue_count = q.count if isinstance(q.count, int) else q.count()
+    since = datetime.now(timezone.utc) - timedelta(hours=24)
     last_snapshot = (
         db.query(MarketSnapshot)
         .order_by(MarketSnapshot.asof_ts.desc())
         .limit(1)
         .one_or_none()
     )
+    snapshots_last_24h = (
+        db.query(func.count())
+        .select_from(MarketSnapshot)
+        .filter(MarketSnapshot.asof_ts >= since)
+        .scalar()
+    )
+    alerts_last_24h = (
+        db.query(func.count())
+        .select_from(Alert)
+        .filter(Alert.created_at >= since)
+        .scalar()
+    )
     return {
-        "last_ingest_ts": last_ingest_ts.decode() if last_ingest_ts else None,
+        "last_ingest_time": last_ingest_ts.decode() if last_ingest_ts else None,
         "last_job_result": last_ingest_result.decode() if last_ingest_result else None,
-        "queue_count": queue_count,
+        "redis_queue_length": queue_count,
         "last_snapshot_ts": last_snapshot.asof_ts.isoformat() if last_snapshot else None,
+        "snapshots_last_24h": snapshots_last_24h or 0,
+        "alerts_last_24h": alerts_last_24h or 0,
     }

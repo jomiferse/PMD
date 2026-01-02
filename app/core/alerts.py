@@ -1,3 +1,4 @@
+import html
 import logging
 
 import httpx
@@ -27,24 +28,37 @@ async def send_telegram_alerts(alerts: list[Alert]) -> dict | None:
     if not filtered:
         return
 
-    lines = ["PMD alerts (analytics only)"]
+    lines = ["<b>PMD Dislocation Alerts</b>", "<i>Read-only analytics</i>", ""]
     for alert in filtered:
-        lines.append(
-            f"- {alert.title[:60]} | p_yes={alert.market_p_yes:.2f} "
-            f"move={alert.move:.2f} liq={alert.liquidity:.0f} vol24h={alert.volume_24h:.0f}"
+        title = html.escape(alert.title[:120])
+        delta_pct = alert.delta_pct * 100 if alert.delta_pct else alert.move * 100
+        lines.extend(
+            [
+                f"[ALERT] <b>{title}</b>",
+                f"Move: <b>{delta_pct:.1f}%</b> ({alert.old_price:.2f} -> {alert.new_price:.2f})",
+                f"Liquidity: {alert.liquidity:,.0f} | Vol24h: {alert.volume_24h:,.0f}",
+                f"Window: {settings.WINDOW_MINUTES}m",
+                "",
+            ]
         )
 
-    text = "\n".join(lines)
+    text = "\n".join(lines).strip()
     url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": settings.TELEGRAM_CHAT_ID,
         "text": text,
-        "parse_mode": "Markdown",
+        "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             response = await client.post(url, json=payload)
+        if not response.is_success:
+            logger.error(
+                "telegram_send_failed status=%s body=%s",
+                response.status_code,
+                response.text[:500],
+            )
         return {
             "ok": response.is_success,
             "status_code": response.status_code,

@@ -3,6 +3,7 @@ import logging
 from datetime import datetime, timezone
 
 import redis
+from sqlalchemy import inspect
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -52,12 +53,28 @@ async def run_ingest_and_alert(db: Session) -> dict:
 
         if snapshot_rows:
             stmt = pg_insert(MarketSnapshot).values(snapshot_rows)
-            stmt = stmt.on_conflict_do_nothing(
-                index_elements=["market_id", "snapshot_bucket"]
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["market_id", "snapshot_bucket"],
+                set_={
+                    "title": stmt.excluded.title,
+                    "category": stmt.excluded.category,
+                    "market_p_yes": stmt.excluded.market_p_yes,
+                    "liquidity": stmt.excluded.liquidity,
+                    "volume_24h": stmt.excluded.volume_24h,
+                    "volume_1w": stmt.excluded.volume_1w,
+                    "best_ask": stmt.excluded.best_ask,
+                    "last_trade_price": stmt.excluded.last_trade_price,
+                    "model_p_yes": stmt.excluded.model_p_yes,
+                    "edge": stmt.excluded.edge,
+                    "source_ts": stmt.excluded.source_ts,
+                    "asof_ts": stmt.excluded.asof_ts,
+                },
             )
             db.execute(stmt)
             db.commit()
 
+        alert_columns = _table_columns(db, "alerts")
+        use_triggered_at = "triggered_at" in alert_columns
         alerts = compute_dislocation_alerts(
             db=db,
             snapshots=snapshot_rows,
@@ -65,7 +82,9 @@ async def run_ingest_and_alert(db: Session) -> dict:
             move_threshold=settings.MOVE_THRESHOLD,
             min_liquidity=settings.MIN_LIQUIDITY,
             min_volume_24h=settings.MIN_VOLUME_24H,
+            cooldown_minutes=settings.ALERT_COOLDOWN_MINUTES,
             tenant_id=settings.DEFAULT_TENANT_ID,
+            use_triggered_at=use_triggered_at,
         )
 
         if alerts:
@@ -73,6 +92,13 @@ async def run_ingest_and_alert(db: Session) -> dict:
             for row in alert_rows:
                 row.pop("_sa_instance_state", None)
                 row.pop("id", None)
+                if alert_columns:
+                    for key in list(row.keys()):
+                        if key not in alert_columns:
+                            row.pop(key, None)
+                else:
+                    for key in OPTIONAL_ALERT_COLUMNS:
+                        row.pop(key, None)
             alert_stmt = pg_insert(Alert).values(alert_rows)
             alert_stmt = alert_stmt.on_conflict_do_nothing(
                 index_elements=["alert_type", "market_id", "snapshot_bucket"]
@@ -104,3 +130,20 @@ async def run_ingest_and_alert(db: Session) -> dict:
 def _snapshot_bucket(ts: datetime) -> datetime:
     minute = (ts.minute // 5) * 5
     return ts.replace(minute=minute, second=0, microsecond=0)
+
+
+def _table_columns(db: Session, table_name: str) -> set[str]:
+    try:
+        insp = inspect(db.get_bind())
+        return {col["name"] for col in insp.get_columns(table_name)}
+    except Exception:
+        logger.exception("inspect_table_columns_failed table=%s", table_name)
+        return set()
+
+
+OPTIONAL_ALERT_COLUMNS = {
+    "old_price",
+    "new_price",
+    "delta_pct",
+    "triggered_at",
+}

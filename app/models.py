@@ -1,4 +1,4 @@
-from sqlalchemy import String, Float, DateTime, Integer, func, UniqueConstraint, Index
+from sqlalchemy import String, Float, DateTime, Integer, func, UniqueConstraint, Index, text
 from sqlalchemy.orm import Mapped, mapped_column
 from .db import Base
 
@@ -7,6 +7,8 @@ class MarketSnapshot(Base):
     __table_args__ = (
         UniqueConstraint("market_id", "snapshot_bucket", name="uq_market_bucket"),
         Index("ix_market_snapshots_bucket", "snapshot_bucket"),
+        Index("ix_market_snapshots_market_asof", "market_id", "asof_ts"),
+        Index("ix_market_snapshots_asof_desc", text("asof_ts DESC")),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -53,6 +55,7 @@ class Alert(Base):
         UniqueConstraint("alert_type", "market_id", "snapshot_bucket", name="uq_alert_market_bucket"),
         Index("ix_alerts_created_at", "created_at"),
         Index("ix_alerts_tenant_type", "tenant_id", "alert_type"),
+        Index("ix_alerts_market_triggered", "market_id", "triggered_at"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -64,9 +67,13 @@ class Alert(Base):
     move: Mapped[float] = mapped_column(Float, default=0.0)
     market_p_yes: Mapped[float] = mapped_column(Float, default=0.0)
     prev_market_p_yes: Mapped[float] = mapped_column(Float, default=0.0)
+    old_price: Mapped[float] = mapped_column(Float, default=0.0)
+    new_price: Mapped[float] = mapped_column(Float, default=0.0)
+    delta_pct: Mapped[float] = mapped_column(Float, default=0.0)
     liquidity: Mapped[float] = mapped_column(Float, default=0.0)
     volume_24h: Mapped[float] = mapped_column(Float, default=0.0)
     snapshot_bucket: Mapped[DateTime] = mapped_column(DateTime, nullable=False)
     source_ts: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
     message: Mapped[str] = mapped_column(String(1024), default="")
+    triggered_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), index=True)
     created_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), index=True)

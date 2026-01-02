@@ -3,7 +3,7 @@
 Read-only analytics. Not financial advice. No guarantee of outcomes. No custody. No execution.
 
 PMD ingests Polymarket Gamma data, stores 5-minute snapshots, and emits dislocation alerts
-based on price movement over a time window. It does not execute trades.
+based on percentage price movement over a time window. It does not execute trades.
 
 ## Quick start
 
@@ -46,6 +46,16 @@ curl -H "X-API-Key: <key>" http://localhost:8000/alerts/latest
 - `GET /alerts/summary` (auth)
 - `GET /status` (auth)
 
+## Alert logic (dislocation)
+
+An alert triggers when:
+- Price moves by at least `MOVE_THRESHOLD` within `WINDOW_MINUTES`
+- Liquidity is at least `MIN_LIQUIDITY`
+- Volume24h is at least `MIN_VOLUME_24H`
+- The same market has not alerted within `ALERT_COOLDOWN_MINUTES`
+
+Alerts store old/new price, delta percent, and the trigger timestamp.
+
 ## Environment variables
 
 Required:
@@ -61,6 +71,7 @@ Optional:
 - `MIN_VOLUME_24H` (default 1000)
 - `MOVE_THRESHOLD` (default 0.05)
 - `WINDOW_MINUTES` (default 60)
+- `ALERT_COOLDOWN_MINUTES` (default 30)
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_CHAT_ID`
 - `TELEGRAM_THROTTLE_SECONDS` (default 900)
@@ -85,6 +96,11 @@ docker compose exec api python -m app.scripts.create_api_key --name prod
 
 The command prints the raw key once. Store it securely and pass it in the `X-API-Key` header.
 Keys are stored hashed in the database.
+
+## Telegram alerts
+
+Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env` and restart the services.
+Alerts are throttled per market using `TELEGRAM_THROTTLE_SECONDS` to prevent spam.
 
 ## Scheduler
 
