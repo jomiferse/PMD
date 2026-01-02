@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from ..polymarket.client import PolymarketClient
 from ..core.scoring import score_market
 from ..core.dislocation import compute_dislocation_alerts
-from ..core.alerts import send_telegram_digest
+from ..core.alerts import send_user_digests
 from ..settings import settings
 from ..models import MarketSnapshot, Alert
 
@@ -112,7 +112,7 @@ async def run_ingest_and_alert(db: Session) -> dict:
             db.execute(alert_stmt)
             db.commit()
 
-        await send_telegram_digest(db, settings.DEFAULT_TENANT_ID)
+        await send_user_digests(db, settings.DEFAULT_TENANT_ID)
 
         result = {
             "ok": True,

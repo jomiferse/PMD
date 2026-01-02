@@ -8,11 +8,13 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 from .db import get_db
+from .auth import admin_key_auth
 from .jobs.run import job_sync_wrapper
 from .logging import configure_logging
-from .models import Alert, MarketSnapshot
+from .models import Alert, AlertDelivery, MarketSnapshot, User, UserAlertPreference
 from .rate_limit import rate_limit
 from .settings import settings
+from .core.alerts import USER_DIGEST_LAST_PAYLOAD_KEY
 
 configure_logging()
 
@@ -141,6 +143,90 @@ def alerts_last_digest(api_key=Depends(rate_limit)):
         return json.loads(payload)
     except Exception:
         return {"last_digest": None}
+
+
+@app.get("/admin/users")
+def admin_users(
+    db: Session = Depends(get_db),
+    _=Depends(admin_key_auth),
+):
+    rows = (
+        db.query(User, UserAlertPreference)
+        .outerjoin(UserAlertPreference, User.user_id == UserAlertPreference.user_id)
+        .order_by(User.created_at.desc())
+        .all()
+    )
+    return [
+        {
+            "user_id": str(user.user_id),
+            "name": user.name,
+            "telegram_chat_id": user.telegram_chat_id,
+            "is_active": user.is_active,
+            "created_at": user.created_at.isoformat(),
+            "preferences": {
+                "min_liquidity": pref.min_liquidity,
+                "min_volume_24h": pref.min_volume_24h,
+                "min_abs_price_move": pref.min_abs_price_move,
+                "alert_strengths": pref.alert_strengths,
+                "digest_window_minutes": pref.digest_window_minutes,
+                "max_alerts_per_digest": pref.max_alerts_per_digest,
+                "created_at": pref.created_at.isoformat(),
+            }
+            if pref
+            else None,
+        }
+        for user, pref in rows
+    ]
+
+
+@app.get("/admin/users/{user_id}/last-digest")
+def admin_user_last_digest(
+    user_id: str,
+    _=Depends(admin_key_auth),
+):
+    key = USER_DIGEST_LAST_PAYLOAD_KEY.format(user_id=user_id)
+    payload = redis_conn.get(key)
+    if not payload:
+        return {"user_id": user_id, "last_digest": None}
+    try:
+        return {"user_id": user_id, "last_digest": json.loads(payload)}
+    except Exception:
+        return {"user_id": user_id, "last_digest": None}
+
+
+@app.get("/admin/stats")
+def admin_stats(
+    db: Session = Depends(get_db),
+    _=Depends(admin_key_auth),
+):
+    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    active_users = (
+        db.query(func.count())
+        .select_from(User)
+        .filter(User.is_active.is_(True))
+        .scalar()
+    )
+    alerts_generated = (
+        db.query(func.count())
+        .select_from(Alert)
+        .filter(Alert.created_at >= since)
+        .scalar()
+    )
+    alerts_delivered = (
+        db.query(func.count())
+        .select_from(AlertDelivery)
+        .filter(
+            AlertDelivery.delivered_at >= since,
+            AlertDelivery.delivery_status == "sent",
+        )
+        .scalar()
+    )
+    return {
+        "since": since.isoformat(),
+        "active_users": active_users or 0,
+        "alerts_generated": alerts_generated or 0,
+        "alerts_delivered": alerts_delivered or 0,
+    }
 
 
 @app.get("/status")

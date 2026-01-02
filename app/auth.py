@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from .db import get_db
 from .models import ApiKey
+from .settings import settings
 
 
 def hash_api_key(raw_key: str) -> str:
@@ -32,3 +33,14 @@ def api_key_auth(
     api_key.last_used_at = datetime.now(timezone.utc)
     db.commit()
     return api_key
+
+
+def admin_key_auth(
+    x_admin_key: str = Header(default="", alias="X-Admin-Key"),
+):
+    expected = (settings.ADMIN_API_KEY or "").strip()
+    if not expected:
+        raise HTTPException(status_code=401, detail="Admin API key not configured")
+    if x_admin_key.strip() != expected:
+        raise HTTPException(status_code=401, detail="Invalid admin API key")
+    return True

@@ -38,6 +38,13 @@ class Settings(BaseSettings):
     TELEGRAM_MAX_ALERTS: int = 7
     TELEGRAM_STRONG_MOVE_PCT: float = 0.15
 
+    ADMIN_API_KEY: str | None = None
+
+    GLOBAL_MIN_LIQUIDITY: float = 1000.0
+    GLOBAL_MIN_VOLUME_24H: float = 1000.0
+    GLOBAL_DIGEST_WINDOW: int = 60
+    GLOBAL_MAX_ALERTS: int = 7
+
     DEFAULT_TENANT_ID: str = "default"
     RATE_LIMIT_DEFAULT_PER_MIN: int = 60
 

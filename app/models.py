@@ -1,4 +1,7 @@
-from sqlalchemy import String, Float, DateTime, Integer, func, UniqueConstraint, Index, text
+import uuid
+
+from sqlalchemy import String, Float, DateTime, Integer, Boolean, ForeignKey, func, UniqueConstraint, Index, text
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from .db import Base
 
@@ -78,3 +81,48 @@ class Alert(Base):
     message: Mapped[str] = mapped_column(String(1024), default="")
     triggered_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), index=True)
     created_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), index=True)
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    telegram_chat_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), nullable=False)
+
+
+class UserAlertPreference(Base):
+    __tablename__ = "user_alert_preferences"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    min_liquidity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    min_volume_24h: Mapped[float | None] = mapped_column(Float, nullable=True)
+    min_abs_price_move: Mapped[float | None] = mapped_column(Float, nullable=True)
+    alert_strengths: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    digest_window_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_alerts_per_digest: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), nullable=False)
+
+
+class AlertDelivery(Base):
+    __tablename__ = "alert_deliveries"
+    __table_args__ = (
+        UniqueConstraint("alert_id", "user_id", name="uq_alert_delivery_alert_user"),
+        Index("ix_alert_deliveries_user_status", "user_id", "delivery_status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    alert_id: Mapped[int] = mapped_column(ForeignKey("alerts.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    delivered_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), nullable=False)
+    delivery_status: Mapped[str] = mapped_column(String(16), nullable=False)
