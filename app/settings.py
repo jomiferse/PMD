@@ -11,7 +11,8 @@ class Settings(BaseSettings):
     POLYMARKET_BASE_URL: str
     POLY_LIMIT: int = 100
     POLY_PAGE_LIMIT: int = 100
-    POLY_MAX_EVENTS: int = 1000
+    POLY_MAX_EVENTS: int | None = None
+    POLY_MAX_PAGES: int | None = 100
     POLY_START_OFFSET: int = 0
     POLY_ORDER: str | None = None
     POLY_ASCENDING: bool | None = None
@@ -55,6 +56,15 @@ class Settings(BaseSettings):
     @classmethod
     def _empty_str_to_none(cls, value):
         if value == "":
+            return None
+        return value
+
+    @field_validator("POLY_MAX_EVENTS", "POLY_MAX_PAGES", mode="before")
+    @classmethod
+    def _none_str_to_none(cls, value):
+        if value is None:
+            return None
+        if isinstance(value, str) and value.strip().lower() in {"", "none", "null"}:
             return None
         return value
 
