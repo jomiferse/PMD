@@ -33,6 +33,8 @@ class PolymarketClient:
         - If order/ascending are set, they are passed through to Gamma; otherwise API order applies
         """
         page_limit = _coerce_non_negative_int(limit or settings.POLY_PAGE_LIMIT)
+        effective_liquidity_min, effective_volume_min = _effective_market_minimums()
+        server_filters_enabled = settings.POLY_USE_SERVER_FILTERS
         max_events = _coerce_optional_non_negative_int(
             settings.POLY_MAX_EVENTS if max_events is None else max_events
         )
@@ -45,14 +47,31 @@ class PolymarketClient:
         order = settings.POLY_ORDER if order is None else order
         ascending = settings.POLY_ASCENDING if ascending is None else ascending
         if page_limit == 0:
+            _log_ingestion_summary(
+                events_fetched=0,
+                markets_parsed=0,
+                markets_kept=0,
+                liquidity_min=effective_liquidity_min,
+                volume_min=effective_volume_min,
+                server_filters_enabled=server_filters_enabled,
+            )
             return []
         if max_events is not None and (max_events == 0 or offset >= max_events):
+            _log_ingestion_summary(
+                events_fetched=0,
+                markets_parsed=0,
+                markets_kept=0,
+                liquidity_min=effective_liquidity_min,
+                volume_min=effective_volume_min,
+                server_filters_enabled=server_filters_enabled,
+            )
             return []
 
         markets: list[PolymarketMarket] = []
         url = f"{self.base_url}/events"
         fetched_events = 0
         page_count = 0
+        parsed_markets = 0
 
         async with httpx.AsyncClient(timeout=15) as client:
             while True:
@@ -68,7 +87,13 @@ class PolymarketClient:
                     break
 
                 params = _build_events_params(
-                    limit=page_limit, offset=offset, order=order, ascending=ascending
+                    limit=page_limit,
+                    offset=offset,
+                    order=order,
+                    ascending=ascending,
+                    liquidity_min=effective_liquidity_min,
+                    volume_min=effective_volume_min,
+                    server_filters_enabled=server_filters_enabled,
                 )
                 events = await self._fetch_events_page(client, url, params)
                 page_count += 1
@@ -77,7 +102,13 @@ class PolymarketClient:
                     break
 
                 fetched_events += len(events)
-                markets.extend(_parse_markets(events))
+                page_markets, page_parsed = _parse_markets(
+                    events,
+                    liquidity_min=effective_liquidity_min,
+                    volume_min=effective_volume_min,
+                )
+                parsed_markets += page_parsed
+                markets.extend(page_markets)
 
                 if max_events is not None and fetched_events >= max_events:
                     break
@@ -87,6 +118,14 @@ class PolymarketClient:
 
                 offset += page_limit
 
+        _log_ingestion_summary(
+            events_fetched=fetched_events,
+            markets_parsed=parsed_markets,
+            markets_kept=len(markets),
+            liquidity_min=effective_liquidity_min,
+            volume_min=effective_volume_min,
+            server_filters_enabled=server_filters_enabled,
+        )
         return markets
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=0.5, min=0.5, max=4))
@@ -123,7 +162,13 @@ def _coerce_optional_non_negative_int(value: int | None) -> int | None:
 
 
 def _build_events_params(
-    limit: int, offset: int, order: str | None, ascending: bool | None
+    limit: int,
+    offset: int,
+    order: str | None,
+    ascending: bool | None,
+    liquidity_min: float | None,
+    volume_min: float | None,
+    server_filters_enabled: bool,
 ) -> dict[str, str]:
     params: dict[str, str] = {
         "active": "true",
@@ -135,15 +180,21 @@ def _build_events_params(
         params["order"] = order
     if ascending is not None:
         params["ascending"] = "true" if ascending else "false"
-    if settings.GLOBAL_MIN_LIQUIDITY > 0:
-        params["liquidity_min"] = str(settings.GLOBAL_MIN_LIQUIDITY)
-    if settings.GLOBAL_MIN_VOLUME_24H > 0:
-        params["volume_min"] = str(settings.GLOBAL_MIN_VOLUME_24H)
+    if server_filters_enabled:
+        if liquidity_min is not None:
+            params["liquidity_min"] = str(liquidity_min)
+        if volume_min is not None:
+            params["volume_min"] = str(volume_min)
     return params
 
 
-def _parse_markets(events: list[dict]) -> list[PolymarketMarket]:
+def _parse_markets(
+    events: list[dict],
+    liquidity_min: float | None,
+    volume_min: float | None,
+) -> tuple[list[PolymarketMarket], int]:
     markets: list[PolymarketMarket] = []
+    parsed_count = 0
 
     for ev in events:
         event_title = (ev.get("title") or "").strip()
@@ -179,10 +230,6 @@ def _parse_markets(events: list[dict]) -> list[PolymarketMarket]:
                 liquidity = 0.0
 
             volume_24h = _parse_float(m.get("volume24hr") or m.get("volume24h"))
-            if settings.GLOBAL_MIN_LIQUIDITY > 0 and liquidity < settings.GLOBAL_MIN_LIQUIDITY:
-                continue
-            if settings.GLOBAL_MIN_VOLUME_24H > 0 and volume_24h < settings.GLOBAL_MIN_VOLUME_24H:
-                continue
 
             title = (m.get("question") or "").strip()
             if not title:
@@ -195,6 +242,12 @@ def _parse_markets(events: list[dict]) -> list[PolymarketMarket]:
 
             market_id = str(m.get("slug") or m.get("id") or "")
             if not market_id:
+                continue
+
+            parsed_count += 1
+            if liquidity_min is not None and liquidity < liquidity_min:
+                continue
+            if volume_min is not None and volume_24h < volume_min:
                 continue
 
             markets.append(
@@ -212,7 +265,60 @@ def _parse_markets(events: list[dict]) -> list[PolymarketMarket]:
                 )
             )
 
-    return markets
+    return markets, parsed_count
+
+
+def _coerce_optional_positive_float(value: float | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0:
+        return None
+    return value
+
+
+def _effective_market_minimums() -> tuple[float | None, float | None]:
+    if settings.POLY_USE_GLOBAL_MINIMUMS:
+        liquidity_min = (
+            settings.POLY_LIQUIDITY_MIN
+            if settings.POLY_LIQUIDITY_MIN is not None
+            else settings.GLOBAL_MIN_LIQUIDITY
+        )
+        volume_min = (
+            settings.POLY_VOLUME_MIN
+            if settings.POLY_VOLUME_MIN is not None
+            else settings.GLOBAL_MIN_VOLUME_24H
+        )
+    else:
+        liquidity_min = settings.POLY_LIQUIDITY_MIN
+        volume_min = settings.POLY_VOLUME_MIN
+    return (
+        _coerce_optional_positive_float(liquidity_min),
+        _coerce_optional_positive_float(volume_min),
+    )
+
+
+def _log_ingestion_summary(
+    events_fetched: int,
+    markets_parsed: int,
+    markets_kept: int,
+    liquidity_min: float | None,
+    volume_min: float | None,
+    server_filters_enabled: bool,
+) -> None:
+    logger.info(
+        "polymarket_ingestion_summary events_fetched=%s markets_parsed=%s markets_kept=%s "
+        "liquidity_min=%s volume_min=%s server_filters_enabled=%s",
+        events_fetched,
+        markets_parsed,
+        markets_kept,
+        liquidity_min,
+        volume_min,
+        server_filters_enabled,
+    )
 
 
 def _parse_ts(value) -> datetime | None:

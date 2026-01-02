@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     POLY_START_OFFSET: int = 0
     POLY_ORDER: str | None = None
     POLY_ASCENDING: bool | None = None
+    POLY_USE_SERVER_FILTERS: bool = True
+    POLY_LIQUIDITY_MIN: float | None = None
+    POLY_VOLUME_MIN: float | None = None
+    POLY_USE_GLOBAL_MINIMUMS: bool = True
     INGEST_INTERVAL_SECONDS: int = 300
 
     MIN_LIQUIDITY: float = 1000.0
@@ -59,7 +63,13 @@ class Settings(BaseSettings):
             return None
         return value
 
-    @field_validator("POLY_MAX_EVENTS", "POLY_MAX_PAGES", mode="before")
+    @field_validator(
+        "POLY_MAX_EVENTS",
+        "POLY_MAX_PAGES",
+        "POLY_LIQUIDITY_MIN",
+        "POLY_VOLUME_MIN",
+        mode="before",
+    )
     @classmethod
     def _none_str_to_none(cls, value):
         if value is None:

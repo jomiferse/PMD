@@ -76,6 +76,10 @@ Optional:
 - `POLY_START_OFFSET` (default 0)
 - `POLY_ORDER` (default unset)
 - `POLY_ASCENDING` (default unset)
+- `POLY_USE_SERVER_FILTERS` (default true)
+- `POLY_LIQUIDITY_MIN` (default unset/None)
+- `POLY_VOLUME_MIN` (default unset/None)
+- `POLY_USE_GLOBAL_MINIMUMS` (default true)
 - `INGEST_INTERVAL_SECONDS` (default 300)
 - `MIN_LIQUIDITY` (default 1000)
 - `MIN_VOLUME_24H` (default 1000)
@@ -92,8 +96,10 @@ Optional:
 - `LOG_LEVEL` (default INFO)
 - `LOG_JSON` (default true)
 
-Gamma ingestion uses `GLOBAL_MIN_LIQUIDITY` and `GLOBAL_MIN_VOLUME_24H` as server-side filters
-when they are greater than zero (with local validation still applied).
+Gamma ingestion can apply server-side filters for liquidity/volume (with local safeguards still applied).
+When `POLY_USE_GLOBAL_MINIMUMS` is true, `POLY_LIQUIDITY_MIN`/`POLY_VOLUME_MIN` default to
+`GLOBAL_MIN_LIQUIDITY`/`GLOBAL_MIN_VOLUME_24H` if unset. Server-side filters reduce payload
+but local safeguards still apply.
 Pagination continues until Gamma returns an empty page or a short page (< `POLY_PAGE_LIMIT`).
 `POLY_MAX_EVENTS` and `POLY_MAX_PAGES` are safety guards to prevent runaway pagination and do not
 change the default behavior of ingesting all available records. When `POLY_ORDER` or
