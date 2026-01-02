@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import json
 
 import redis
 from fastapi import Depends, FastAPI
@@ -27,6 +28,7 @@ app = FastAPI(
 
 redis_conn = redis.from_url(settings.REDIS_URL)
 q = Queue("default", connection=redis_conn)
+LAST_DIGEST_KEY = "alerts:last_digest:{tenant_id}"
 
 
 @app.get("/health")
@@ -101,6 +103,7 @@ def alerts_latest(
             "new_price": r.new_price,
             "liquidity": r.liquidity,
             "volume_24h": r.volume_24h,
+            "strength": r.strength,
             "snapshot_bucket": r.snapshot_bucket.isoformat(),
             "source_ts": r.source_ts.isoformat() if r.source_ts else None,
             "triggered_at": r.triggered_at.isoformat() if r.triggered_at else None,
@@ -126,6 +129,18 @@ def alerts_summary(
     for (alert_type,) in rows:
         counts[alert_type] = counts.get(alert_type, 0) + 1
     return {"since": since.isoformat(), "counts": counts}
+
+
+@app.get("/alerts/last-digest")
+def alerts_last_digest(api_key=Depends(rate_limit)):
+    key = LAST_DIGEST_KEY.format(tenant_id=api_key.tenant_id)
+    payload = redis_conn.get(key)
+    if not payload:
+        return {"last_digest": None}
+    try:
+        return json.loads(payload)
+    except Exception:
+        return {"last_digest": None}
 
 
 @app.get("/status")

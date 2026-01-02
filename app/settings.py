@@ -20,6 +20,17 @@ class Settings(BaseSettings):
     FLOOR_PRICE: float = 0.05
     WINDOW_MINUTES: int = 60
     ALERT_COOLDOWN_MINUTES: int = 30
+    DIGEST_WINDOW_MINUTES: int = 60
+
+    STRONG_ABS_MOVE_THRESHOLD: float = 0.02
+    STRONG_MIN_LIQUIDITY: float = 5000.0
+    STRONG_MIN_VOLUME_24H: float = 5000.0
+    MEDIUM_MOVE_THRESHOLD: float = 0.05
+    MEDIUM_ABS_MOVE_THRESHOLD: float = 0.01
+    MEDIUM_MIN_LIQUIDITY: float = 1000.0
+    MEDIUM_MIN_VOLUME_24H: float = 1000.0
+    MAX_STRONG_ALERTS: int = 5
+    MAX_MEDIUM_ALERTS: int = 3
 
     TELEGRAM_BOT_TOKEN: str | None = None
     TELEGRAM_CHAT_ID: str | None = None

@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from ..polymarket.client import PolymarketClient
 from ..core.scoring import score_market
 from ..core.dislocation import compute_dislocation_alerts
-from ..core.alerts import send_telegram_alerts
+from ..core.alerts import send_telegram_digest
 from ..settings import settings
 from ..models import MarketSnapshot, Alert
 
@@ -79,13 +79,16 @@ async def run_ingest_and_alert(db: Session) -> dict:
             db=db,
             snapshots=snapshot_rows,
             window_minutes=settings.WINDOW_MINUTES,
-            move_threshold=settings.MOVE_THRESHOLD,
+            medium_move_threshold=settings.MEDIUM_MOVE_THRESHOLD,
             min_price_threshold=settings.MIN_PRICE_THRESHOLD,
-            min_abs_move=settings.MIN_ABS_MOVE,
+            medium_abs_move_threshold=settings.MEDIUM_ABS_MOVE_THRESHOLD,
             floor_price=settings.FLOOR_PRICE,
-            min_liquidity=settings.MIN_LIQUIDITY,
-            min_volume_24h=settings.MIN_VOLUME_24H,
-            cooldown_minutes=settings.ALERT_COOLDOWN_MINUTES,
+            medium_min_liquidity=settings.MEDIUM_MIN_LIQUIDITY,
+            medium_min_volume_24h=settings.MEDIUM_MIN_VOLUME_24H,
+            strong_abs_move_threshold=settings.STRONG_ABS_MOVE_THRESHOLD,
+            strong_min_liquidity=settings.STRONG_MIN_LIQUIDITY,
+            strong_min_volume_24h=settings.STRONG_MIN_VOLUME_24H,
+            cooldown_minutes=settings.DIGEST_WINDOW_MINUTES,
             tenant_id=settings.DEFAULT_TENANT_ID,
             use_triggered_at=use_triggered_at,
         )
@@ -109,7 +112,7 @@ async def run_ingest_and_alert(db: Session) -> dict:
             db.execute(alert_stmt)
             db.commit()
 
-        await send_telegram_alerts(alerts)
+        await send_telegram_digest(db, settings.DEFAULT_TENANT_ID)
 
         result = {
             "ok": True,
@@ -149,4 +152,5 @@ OPTIONAL_ALERT_COLUMNS = {
     "new_price",
     "delta_pct",
     "triggered_at",
+    "strength",
 }

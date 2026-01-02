@@ -72,6 +72,7 @@ class Alert(Base):
     delta_pct: Mapped[float] = mapped_column(Float, default=0.0)
     liquidity: Mapped[float] = mapped_column(Float, default=0.0)
     volume_24h: Mapped[float] = mapped_column(Float, default=0.0)
+    strength: Mapped[str] = mapped_column(String(16), default="MEDIUM")
     snapshot_bucket: Mapped[DateTime] = mapped_column(DateTime, nullable=False)
     source_ts: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
     message: Mapped[str] = mapped_column(String(1024), default="")
