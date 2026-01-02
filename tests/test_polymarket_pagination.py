@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 import httpx
 
@@ -105,5 +106,56 @@ def test_paginated_respects_max_events(monkeypatch):
 
     markets = asyncio.run(_run())
 
-    assert [int(c["limit"]) for c in calls] == [2, 1]
+    assert [int(c["limit"]) for c in calls] == [2, 2]
+    assert [int(c["offset"]) for c in calls] == [0, 2]
     assert [m.market_id for m in markets] == ["m1", "m2", "m3"]
+
+
+def test_paginated_stops_on_max_pages_with_warning(monkeypatch, caplog):
+    responses = {
+        0: [_event(1, "m1"), _event(2, "m2")],
+        2: [_event(3, "m3"), _event(4, "m4")],
+        4: [_event(5, "m5"), _event(6, "m6")],
+    }
+    calls = []
+    monkeypatch.setattr(httpx, "AsyncClient", _mock_async_client(responses, calls))
+    monkeypatch.setattr(settings, "GLOBAL_MIN_LIQUIDITY", 0.0)
+    monkeypatch.setattr(settings, "GLOBAL_MIN_VOLUME_24H", 0.0)
+    monkeypatch.setattr(settings, "POLY_MAX_PAGES", 2)
+
+    async def _run():
+        client = PolymarketClient()
+        markets = await client.fetch_markets_paginated(limit=2, max_events=None, start_offset=0)
+        return markets
+
+    with caplog.at_level(logging.WARNING):
+        markets = asyncio.run(_run())
+
+    assert [int(c["offset"]) for c in calls] == [0, 2]
+    assert [m.market_id for m in markets] == ["m1", "m2", "m3", "m4"]
+    assert "polymarket_pagination_max_pages_reached" in caplog.text
+
+
+def test_paginated_ignores_none_max_events(monkeypatch):
+    responses = {
+        0: [_event(1, "m1"), _event(2, "m2")],
+        2: [_event(3, "m3"), _event(4, "m4")],
+        4: [_event(5, "m5"), _event(6, "m6")],
+        6: [],
+    }
+    calls = []
+    monkeypatch.setattr(httpx, "AsyncClient", _mock_async_client(responses, calls))
+    monkeypatch.setattr(settings, "GLOBAL_MIN_LIQUIDITY", 0.0)
+    monkeypatch.setattr(settings, "GLOBAL_MIN_VOLUME_24H", 0.0)
+    monkeypatch.setattr(settings, "POLY_MAX_EVENTS", None)
+    monkeypatch.setattr(settings, "POLY_MAX_PAGES", None)
+
+    async def _run():
+        client = PolymarketClient()
+        markets = await client.fetch_markets_paginated(limit=2, max_events=None, start_offset=0)
+        return markets
+
+    markets = asyncio.run(_run())
+
+    assert [int(c["offset"]) for c in calls] == [0, 2, 4, 6]
+    assert [m.market_id for m in markets] == ["m1", "m2", "m3", "m4", "m5", "m6"]
