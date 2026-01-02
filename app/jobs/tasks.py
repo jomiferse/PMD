@@ -25,7 +25,7 @@ async def run_ingest_and_alert(db: Session) -> dict:
         client = PolymarketClient()
         markets = await client.fetch_markets_paginated()
 
-        snapshot_rows: list[dict] = []
+        snapshot_rows_map: dict[tuple[str, datetime], dict] = {}
         for m in markets:
             s = score_market(m.market_id, m.title, m.category or "unknown", m.p_yes, m.liquidity)
 
@@ -36,24 +36,28 @@ async def run_ingest_and_alert(db: Session) -> dict:
             source_ts = m.source_ts or started_at
             bucket = _snapshot_bucket(source_ts)
 
-            snapshot_rows.append(
-                {
-                    "market_id": market_id,
-                    "title": title,
-                    "category": category,
-                    "market_p_yes": s.market_p_yes,
-                    "liquidity": s.liquidity,
-                    "volume_24h": m.volume_24h,
-                    "volume_1w": m.volume_1w,
-                    "best_ask": m.best_ask,
-                    "last_trade_price": m.last_trade_price,
-                    "model_p_yes": s.model_p_yes,
-                    "edge": s.edge,
-                    "source_ts": source_ts,
-                    "snapshot_bucket": bucket,
-                    "asof_ts": started_at,
-                }
-            )
+            key = (market_id, bucket)
+            row = {
+                "market_id": market_id,
+                "title": title,
+                "category": category,
+                "market_p_yes": s.market_p_yes,
+                "liquidity": s.liquidity,
+                "volume_24h": m.volume_24h,
+                "volume_1w": m.volume_1w,
+                "best_ask": m.best_ask,
+                "last_trade_price": m.last_trade_price,
+                "model_p_yes": s.model_p_yes,
+                "edge": s.edge,
+                "source_ts": source_ts,
+                "snapshot_bucket": bucket,
+                "asof_ts": started_at,
+            }
+            existing = snapshot_rows_map.get(key)
+            if existing is None or source_ts >= existing.get("source_ts", started_at):
+                snapshot_rows_map[key] = row
+
+        snapshot_rows = list(snapshot_rows_map.values())
 
         if snapshot_rows:
             stmt = pg_insert(MarketSnapshot).values(snapshot_rows)
