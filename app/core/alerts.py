@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from ..models import Alert, AlertDelivery, User, UserAlertPreference
 from ..settings import settings
 from .alert_strength import AlertStrength
+from .alert_classification import AlertClassification, classify_alert, classify_alert_with_snapshots
 
 logger = logging.getLogger(__name__)
 redis_conn = redis.from_url(settings.REDIS_URL)
@@ -183,6 +184,30 @@ async def _send_user_digest(db: Session, tenant_id: str, config: UserDigestConfi
         )
         return {"user_id": str(config.user_id), "sent": False, "reason": "missing_chat_id"}
 
+    classification_cache: dict[int, AlertClassification] = {}
+
+    def classifier(alert: Alert) -> AlertClassification:
+        key = alert.id if alert.id is not None else id(alert)
+        cached = classification_cache.get(key)
+        if cached:
+            return cached
+        classification = classify_alert_with_snapshots(db, alert)
+        classification_cache[key] = classification
+        return classification
+
+    counts = {"REPRICING": 0, "LIQUIDITY_SWEEP": 0, "NOISY": 0}
+    for alert in selected_alerts:
+        classification = classifier(alert)
+        counts[classification.signal_type] = counts.get(classification.signal_type, 0) + 1
+    logger.info(
+        "alert_classification_summary user_id=%s repricing=%s liquidity_sweep=%s noisy=%s total=%s",
+        config.user_id,
+        counts.get("REPRICING", 0),
+        counts.get("LIQUIDITY_SWEEP", 0),
+        counts.get("NOISY", 0),
+        len(selected_alerts),
+    )
+
     text = _format_digest_message(
         selected_strong,
         selected_medium,
@@ -190,6 +215,7 @@ async def _send_user_digest(db: Session, tenant_id: str, config: UserDigestConfi
         total_strong=len(strong_alerts),
         total_medium=len(medium_alerts),
         user_name=config.name,
+        classifier=classifier,
     )
     if not text:
         _record_alert_deliveries(
@@ -424,41 +450,51 @@ def _format_digest_message(
     total_strong: int,
     total_medium: int,
     user_name: str | None = None,
+    classifier=None,
 ) -> str:
     if not strong_alerts:
         return ""
 
     name_suffix = f" for {html.escape(user_name)}" if user_name else ""
     header = f"<b>PMD - Market Dislocation Digest{name_suffix} ({window_minutes}m)</b>"
-    summary = f"{total_strong} strong / {total_medium} notable moves detected"
+    summary = f"{total_strong} STRONG / {total_medium} NOTABLE moves detected"
     lines = [header, summary, ""]
 
     ranked_alerts = _rank_digest_alerts(strong_alerts + medium_alerts)
-    for idx, alert in enumerate(ranked_alerts, start=1):
-        title = html.escape(alert.title[:120])
-        rank_label = "STRONG" if alert.strength == AlertStrength.STRONG.value else "NOTABLE"
-        rank_context = (
-            f"signal in last {window_minutes}m"
-            if alert.strength == AlertStrength.STRONG.value
-            else "notable move"
-        )
-        trend_icon = "UP" if _is_up_move(alert) else "DOWN"
-        lines.extend(
-            [
-                f"<b>#{idx} {rank_label}</b> {rank_context}",
-                f"{trend_icon} {title}",
-                f"Direction: {_format_direction(alert)}",
-                f"Move: {_format_move(alert)}",
-                f"Liquidity: {_format_compact_usd(alert.liquidity)} | Vol24h: {_format_compact_usd(alert.volume_24h)}",
-                f"Market quality: {_format_market_quality(alert)}",
-                _format_why(alert, window_minutes),
-                f"Open market -> {_format_market_link(alert.market_id)}",
-                "",
-            ]
-        )
+    display_cap = 7
+    display_alerts = ranked_alerts[:display_cap]
+    for idx, alert in enumerate(display_alerts, start=1):
+        lines.extend(_format_digest_alert(alert, idx, window_minutes, classifier))
+        lines.append("")
 
-    lines.append("<i>Read-only analytics - No execution - Not financial advice</i>")
+    if len(ranked_alerts) > len(display_alerts):
+        remaining = len(ranked_alerts) - len(display_alerts)
+        lines.extend([f"+{remaining} more moves not shown", ""])
+
+    lines.append("<i>Read-only analytics - Not financial advice</i>")
     return "\n".join(lines).strip()
+
+
+def _format_digest_alert(
+    alert: Alert,
+    idx: int,
+    window_minutes: int,
+    classifier=None,
+) -> list[str]:
+    title = html.escape(alert.title[:120])
+    rank_label = "STRONG" if alert.strength == AlertStrength.STRONG.value else "NOTABLE"
+    move_text = _format_move(alert)
+    p_yes_text = _format_p_yes(alert)
+    classification = classifier(alert) if classifier else classify_alert(alert)
+    liquidity_text = _format_liquidity_volume(alert)
+    return [
+        f"<b>#{idx} {rank_label} - {classification.signal_type} ({classification.confidence})</b>",
+        title,
+        f"Move: {move_text} | {p_yes_text}",
+        liquidity_text,
+        f"Suggested action: {classification.suggested_action}",
+        _format_market_link(alert.market_id),
+    ]
 
 
 def _format_compact_usd(value: float) -> str:
@@ -494,16 +530,6 @@ def _signed_price_delta(alert: Alert) -> float:
     return alert.move or 0.0
 
 
-def _is_up_move(alert: Alert) -> bool:
-    return _signed_price_delta(alert) >= 0
-
-
-def _format_direction(alert: Alert) -> str:
-    if _is_up_move(alert):
-        return "YES up"
-    return "YES down (toward NO)"
-
-
 def _format_move(alert: Alert) -> str:
     signed_delta = _signed_price_delta(alert)
     abs_move = abs(signed_delta)
@@ -513,19 +539,18 @@ def _format_move(alert: Alert) -> str:
     return f"{sign}{abs_move:.3f} ({sign}{delta_pct:.1f}%)"
 
 
-def _format_market_quality(alert: Alert) -> str:
-    if alert.liquidity >= settings.STRONG_MIN_LIQUIDITY and alert.volume_24h >= settings.STRONG_MIN_VOLUME_24H:
-        return "High liquidity & volume"
-    if alert.liquidity >= settings.GLOBAL_MIN_LIQUIDITY and alert.volume_24h >= settings.GLOBAL_MIN_VOLUME_24H:
-        return "Moderate liquidity & volume"
-    return "Thin market"
+def _format_p_yes(alert: Alert) -> str:
+    new_value = alert.market_p_yes
+    if new_value is None:
+        return "p_yes now: n/a"
+    new_text = f"{new_value * 100:.1f}%"
+    if alert.prev_market_p_yes is not None:
+        prev_text = f"{alert.prev_market_p_yes * 100:.1f}%"
+        return f"p_yes: {prev_text} -> {new_text}"
+    return f"p_yes now: {new_text}"
 
 
-def _format_why(alert: Alert, window_minutes: int) -> str:
-    signed_delta = _signed_price_delta(alert)
-    raw_delta_pct = alert.delta_pct if alert.delta_pct is not None else alert.move
-    delta_pct = abs((raw_delta_pct or 0.0) * 100)
-    sign = "+" if signed_delta >= 0 else "-"
+def _format_liquidity_volume(alert: Alert) -> str:
     liq_descriptor = _descriptor_from_thresholds(
         alert.liquidity,
         settings.STRONG_MIN_LIQUIDITY,
@@ -536,15 +561,15 @@ def _format_why(alert: Alert, window_minutes: int) -> str:
         settings.STRONG_MIN_VOLUME_24H,
         settings.GLOBAL_MIN_VOLUME_24H,
     )
-    return f"Why: {sign}{delta_pct:.1f}% move in {window_minutes}m with {liq_descriptor} liquidity and {vol_descriptor} volume"
+    return f"Liquidity: {liq_descriptor} | Volume: {vol_descriptor}"
 
 
 def _descriptor_from_thresholds(value: float, high: float, moderate: float) -> str:
     if value >= high:
-        return "high"
+        return "High"
     if value >= moderate:
-        return "moderate"
-    return "light"
+        return "Moderate"
+    return "Light"
 
 
 def _format_market_link(market_id: str) -> str:

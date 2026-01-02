@@ -15,6 +15,7 @@ from .models import Alert, AlertDelivery, MarketSnapshot, User, UserAlertPrefere
 from .rate_limit import rate_limit
 from .settings import settings
 from .core.alerts import USER_DIGEST_LAST_PAYLOAD_KEY
+from .core.alert_classification import classify_alert_with_snapshots
 
 configure_logging()
 
@@ -90,30 +91,36 @@ def alerts_latest(
         .limit(limit)
         .all()
     )
-    return [
-        {
-            "id": r.id,
-            "type": r.alert_type,
-            "market_id": r.market_id,
-            "title": r.title,
-            "category": r.category,
-            "move": r.move,
-            "delta_pct": r.delta_pct,
-            "market_p_yes": r.market_p_yes,
-            "prev_market_p_yes": r.prev_market_p_yes,
-            "old_price": r.old_price,
-            "new_price": r.new_price,
-            "liquidity": r.liquidity,
-            "volume_24h": r.volume_24h,
-            "strength": r.strength,
-            "snapshot_bucket": r.snapshot_bucket.isoformat(),
-            "source_ts": r.source_ts.isoformat() if r.source_ts else None,
-            "triggered_at": r.triggered_at.isoformat() if r.triggered_at else None,
-            "created_at": r.created_at.isoformat(),
-            "message": r.message,
-        }
-        for r in rows
-    ]
+    results = []
+    for r in rows:
+        classification = classify_alert_with_snapshots(db, r)
+        results.append(
+            {
+                "signal_type": classification.signal_type,
+                "confidence": classification.confidence,
+                "suggested_action": classification.suggested_action,
+                "id": r.id,
+                "type": r.alert_type,
+                "market_id": r.market_id,
+                "title": r.title,
+                "category": r.category,
+                "move": r.move,
+                "delta_pct": r.delta_pct,
+                "market_p_yes": r.market_p_yes,
+                "prev_market_p_yes": r.prev_market_p_yes,
+                "old_price": r.old_price,
+                "new_price": r.new_price,
+                "liquidity": r.liquidity,
+                "volume_24h": r.volume_24h,
+                "strength": r.strength,
+                "snapshot_bucket": r.snapshot_bucket.isoformat(),
+                "source_ts": r.source_ts.isoformat() if r.source_ts else None,
+                "triggered_at": r.triggered_at.isoformat() if r.triggered_at else None,
+                "created_at": r.created_at.isoformat(),
+                "message": r.message,
+            }
+        )
+    return results
 
 
 @app.get("/alerts/summary")

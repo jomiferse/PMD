@@ -4,9 +4,9 @@ from app.core.alerts import _format_digest_message
 from app.models import Alert
 
 
-def test_digest_formatting_is_utf8_safe():
+def _make_alert(**overrides):
     now_ts = datetime.now(timezone.utc)
-    alert = Alert(
+    data = dict(
         tenant_id="tenant-1",
         alert_type="DISLOCATION",
         market_id="market-1",
@@ -27,6 +27,12 @@ def test_digest_formatting_is_utf8_safe():
         triggered_at=now_ts,
         created_at=now_ts,
     )
+    data.update(overrides)
+    return Alert(**data)
+
+
+def test_digest_formatting_is_utf8_safe():
+    alert = _make_alert()
 
     text = _format_digest_message(
         strong_alerts=[alert],
@@ -40,3 +46,37 @@ def test_digest_formatting_is_utf8_safe():
     assert text
     text.encode("utf-8")
     assert "\ufffd" not in text
+    assert "NOTABLE notable" not in text
+    assert "Move:" in text
+    assert "Liquidity:" in text
+    assert "Suggested action:" in text
+    assert "LIQUIDITY_SWEEP" in text
+    assert "MEDIUM" in text
+    assert "https://polymarket.com/market/market-1" in text
+
+
+def test_digest_includes_p_yes_delta_when_available():
+    alert = _make_alert(prev_market_p_yes=0.4, market_p_yes=0.6)
+    text = _format_digest_message(
+        strong_alerts=[alert],
+        medium_alerts=[],
+        window_minutes=60,
+        total_strong=1,
+        total_medium=0,
+        user_name="Alice",
+    )
+    assert "p_yes: 40.0% -> 60.0%" in text
+
+
+def test_digest_falls_back_to_p_yes_now_when_missing_prev():
+    alert = _make_alert(prev_market_p_yes=None, market_p_yes=0.52)
+    text = _format_digest_message(
+        strong_alerts=[alert],
+        medium_alerts=[],
+        window_minutes=60,
+        total_strong=1,
+        total_medium=0,
+        user_name="Alice",
+    )
+    assert "p_yes now: 52.0%" in text
+    assert "->" not in text
