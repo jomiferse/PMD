@@ -1,3 +1,4 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
@@ -9,12 +10,15 @@ class Settings(BaseSettings):
 
     POLYMARKET_BASE_URL: str
     POLY_LIMIT: int = 100
+    POLY_PAGE_LIMIT: int = 100
+    POLY_MAX_EVENTS: int = 1000
+    POLY_START_OFFSET: int = 0
+    POLY_ORDER: str | None = None
+    POLY_ASCENDING: bool | None = None
     INGEST_INTERVAL_SECONDS: int = 300
 
-    EDGE_THRESHOLD: float = 0.08
     MIN_LIQUIDITY: float = 1000.0
     MIN_VOLUME_24H: float = 1000.0
-    MOVE_THRESHOLD: float = 0.05
     MIN_PRICE_THRESHOLD: float = 0.02
     MIN_ABS_MOVE: float = 0.01
     FLOOR_PRICE: float = 0.05
@@ -33,10 +37,6 @@ class Settings(BaseSettings):
     MAX_MEDIUM_ALERTS: int = 3
 
     TELEGRAM_BOT_TOKEN: str | None = None
-    TELEGRAM_CHAT_ID: str | None = None
-    TELEGRAM_THROTTLE_SECONDS: int = 900
-    TELEGRAM_MAX_ALERTS: int = 7
-    TELEGRAM_STRONG_MOVE_PCT: float = 0.15
 
     ADMIN_API_KEY: str | None = None
 
@@ -50,5 +50,12 @@ class Settings(BaseSettings):
 
     LOG_LEVEL: str = "INFO"
     LOG_JSON: bool = True
+
+    @field_validator("POLY_ORDER", "POLY_ASCENDING", mode="before")
+    @classmethod
+    def _empty_str_to_none(cls, value):
+        if value == "":
+            return None
+        return value
 
 settings = Settings()

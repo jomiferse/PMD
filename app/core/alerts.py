@@ -3,6 +3,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 from uuid import UUID
 
 import httpx
@@ -428,33 +429,33 @@ def _format_digest_message(
         return ""
 
     name_suffix = f" for {html.escape(user_name)}" if user_name else ""
-    header = f"<b>PMD Digest{name_suffix} - last {window_minutes} minutes</b>"
-    summary = f"{total_strong} strong dislocations detected in the last {window_minutes} minutes"
+    header = f"<b>PMD - Market Dislocation Digest{name_suffix} ({window_minutes}m)</b>"
+    summary = f"{total_strong} strong / {total_medium} notable moves detected"
     lines = [header, summary, ""]
 
-    lines.append("<b>STRONG SIGNALS</b>")
-    for alert in strong_alerts:
+    ranked_alerts = _rank_digest_alerts(strong_alerts + medium_alerts)
+    for idx, alert in enumerate(ranked_alerts, start=1):
         title = html.escape(alert.title[:120])
-        raw_delta_pct = alert.delta_pct if alert.delta_pct is not None else alert.move
-        delta_pct = (raw_delta_pct or 0.0) * 100
-        is_up = alert.new_price >= alert.old_price
-        direction = "UP" if is_up else "DOWN"
-        sign = "+" if is_up else "-"
+        rank_label = "STRONG" if alert.strength == AlertStrength.STRONG.value else "NOTABLE"
+        rank_context = (
+            f"signal in last {window_minutes}m"
+            if alert.strength == AlertStrength.STRONG.value
+            else "notable move"
+        )
+        trend_icon = "UP" if _is_up_move(alert) else "DOWN"
         lines.extend(
             [
-                f"{direction}: {title}",
-                f"{alert.old_price:.2f} -> {alert.new_price:.2f} ({sign}{delta_pct:.1f}%)",
+                f"<b>#{idx} {rank_label}</b> {rank_context}",
+                f"{trend_icon} {title}",
+                f"Direction: {_format_direction(alert)}",
+                f"Move: {_format_move(alert)}",
                 f"Liquidity: {_format_compact_usd(alert.liquidity)} | Vol24h: {_format_compact_usd(alert.volume_24h)}",
+                f"Market quality: {_format_market_quality(alert)}",
+                _format_why(alert, window_minutes),
+                f"Open market -> {_format_market_link(alert.market_id)}",
                 "",
             ]
         )
-
-    if medium_alerts:
-        lines.append("<b>OTHER NOTABLE MOVES</b>")
-        for alert in medium_alerts:
-            title = html.escape(alert.title[:120])
-            lines.append(f"- {title}")
-        lines.append("")
 
     lines.append("<i>Read-only analytics - No execution - Not financial advice</i>")
     return "\n".join(lines).strip()
@@ -469,3 +470,83 @@ def _format_compact_usd(value: float) -> str:
     if abs_value >= 1_000:
         return f"${value / 1_000:.1f}k"
     return f"${value:,.0f}"
+
+
+def _rank_digest_alerts(alerts: list[Alert]) -> list[Alert]:
+    def _strength_weight(alert: Alert) -> int:
+        return 1 if alert.strength == AlertStrength.STRONG.value else 0
+
+    return sorted(
+        alerts,
+        key=lambda alert: (
+            _strength_weight(alert),
+            abs(_signed_price_delta(alert)),
+            alert.liquidity,
+            alert.volume_24h,
+        ),
+        reverse=True,
+    )
+
+
+def _signed_price_delta(alert: Alert) -> float:
+    if alert.new_price is not None and alert.old_price is not None:
+        return alert.new_price - alert.old_price
+    return alert.move or 0.0
+
+
+def _is_up_move(alert: Alert) -> bool:
+    return _signed_price_delta(alert) >= 0
+
+
+def _format_direction(alert: Alert) -> str:
+    if _is_up_move(alert):
+        return "YES up"
+    return "YES down (toward NO)"
+
+
+def _format_move(alert: Alert) -> str:
+    signed_delta = _signed_price_delta(alert)
+    abs_move = abs(signed_delta)
+    raw_delta_pct = alert.delta_pct if alert.delta_pct is not None else alert.move
+    delta_pct = abs((raw_delta_pct or 0.0) * 100)
+    sign = "+" if signed_delta >= 0 else "-"
+    return f"{sign}{abs_move:.3f} ({sign}{delta_pct:.1f}%)"
+
+
+def _format_market_quality(alert: Alert) -> str:
+    if alert.liquidity >= settings.STRONG_MIN_LIQUIDITY and alert.volume_24h >= settings.STRONG_MIN_VOLUME_24H:
+        return "High liquidity & volume"
+    if alert.liquidity >= settings.GLOBAL_MIN_LIQUIDITY and alert.volume_24h >= settings.GLOBAL_MIN_VOLUME_24H:
+        return "Moderate liquidity & volume"
+    return "Thin market"
+
+
+def _format_why(alert: Alert, window_minutes: int) -> str:
+    signed_delta = _signed_price_delta(alert)
+    raw_delta_pct = alert.delta_pct if alert.delta_pct is not None else alert.move
+    delta_pct = abs((raw_delta_pct or 0.0) * 100)
+    sign = "+" if signed_delta >= 0 else "-"
+    liq_descriptor = _descriptor_from_thresholds(
+        alert.liquidity,
+        settings.STRONG_MIN_LIQUIDITY,
+        settings.GLOBAL_MIN_LIQUIDITY,
+    )
+    vol_descriptor = _descriptor_from_thresholds(
+        alert.volume_24h,
+        settings.STRONG_MIN_VOLUME_24H,
+        settings.GLOBAL_MIN_VOLUME_24H,
+    )
+    return f"Why: {sign}{delta_pct:.1f}% move in {window_minutes}m with {liq_descriptor} liquidity and {vol_descriptor} volume"
+
+
+def _descriptor_from_thresholds(value: float, high: float, moderate: float) -> str:
+    if value >= high:
+        return "high"
+    if value >= moderate:
+        return "moderate"
+    return "light"
+
+
+def _format_market_link(market_id: str) -> str:
+    safe_id = quote(str(market_id).strip())
+    return f"https://polymarket.com/market/{safe_id}"

@@ -23,20 +23,24 @@ async def run_ingest_and_alert(db: Session) -> dict:
 
     try:
         client = PolymarketClient()
-        markets = await client.fetch_markets()
+        markets = await client.fetch_markets_paginated()
 
         snapshot_rows: list[dict] = []
         for m in markets:
             s = score_market(m.market_id, m.title, m.category or "unknown", m.p_yes, m.liquidity)
+
+            market_id = _truncate_str(s.market_id, 128)
+            title = _truncate_str(s.title, 512)
+            category = _truncate_str(s.category, 128)
 
             source_ts = m.source_ts or started_at
             bucket = _snapshot_bucket(source_ts)
 
             snapshot_rows.append(
                 {
-                    "market_id": s.market_id,
-                    "title": s.title,
-                    "category": s.category,
+                    "market_id": market_id,
+                    "title": title,
+                    "category": category,
                     "market_p_yes": s.market_p_yes,
                     "liquidity": s.liquidity,
                     "volume_24h": m.volume_24h,
@@ -88,7 +92,7 @@ async def run_ingest_and_alert(db: Session) -> dict:
             strong_abs_move_threshold=settings.STRONG_ABS_MOVE_THRESHOLD,
             strong_min_liquidity=settings.STRONG_MIN_LIQUIDITY,
             strong_min_volume_24h=settings.STRONG_MIN_VOLUME_24H,
-            cooldown_minutes=settings.DIGEST_WINDOW_MINUTES,
+            cooldown_minutes=settings.ALERT_COOLDOWN_MINUTES,
             tenant_id=settings.DEFAULT_TENANT_ID,
             use_triggered_at=use_triggered_at,
         )
@@ -136,6 +140,14 @@ async def run_ingest_and_alert(db: Session) -> dict:
 def _snapshot_bucket(ts: datetime) -> datetime:
     minute = (ts.minute // 5) * 5
     return ts.replace(minute=minute, second=0, microsecond=0)
+
+
+def _truncate_str(value: str | None, max_len: int) -> str:
+    if not value:
+        return ""
+    if len(value) <= max_len:
+        return value
+    return value[:max_len]
 
 
 def _table_columns(db: Session, table_name: str) -> set[str]:

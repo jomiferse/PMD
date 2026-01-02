@@ -53,9 +53,9 @@ curl -H "X-API-Key: <key>" http://localhost:8000/alerts/latest
 ## Alert logic (dislocation)
 
 An alert triggers when:
-- Price moves by at least `MOVE_THRESHOLD` within `WINDOW_MINUTES`
-- Liquidity is at least `MIN_LIQUIDITY`
-- Volume24h is at least `MIN_VOLUME_24H`
+- Price moves by at least `MEDIUM_MOVE_THRESHOLD` within `WINDOW_MINUTES`
+- Liquidity is at least `MEDIUM_MIN_LIQUIDITY`
+- Volume24h is at least `MEDIUM_MIN_VOLUME_24H`
 - The same market has not alerted within `ALERT_COOLDOWN_MINUTES`
 
 Alerts store old/new price, delta percent, and the trigger timestamp.
@@ -70,16 +70,17 @@ Required:
 
 Optional:
 - `POLY_LIMIT` (default 100)
+- `POLY_PAGE_LIMIT` (default 100)
+- `POLY_MAX_EVENTS` (default 1000)
+- `POLY_START_OFFSET` (default 0)
+- `POLY_ORDER` (default unset)
+- `POLY_ASCENDING` (default unset)
 - `INGEST_INTERVAL_SECONDS` (default 300)
-- `EDGE_THRESHOLD` (default 0.08)
 - `MIN_LIQUIDITY` (default 1000)
 - `MIN_VOLUME_24H` (default 1000)
-- `MOVE_THRESHOLD` (default 0.05)
 - `WINDOW_MINUTES` (default 60)
 - `ALERT_COOLDOWN_MINUTES` (default 30)
 - `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_CHAT_ID`
-- `TELEGRAM_THROTTLE_SECONDS` (default 900)
 - `ADMIN_API_KEY`
 - `GLOBAL_MIN_LIQUIDITY` (default 1000)
 - `GLOBAL_MIN_VOLUME_24H` (default 1000)
@@ -89,6 +90,9 @@ Optional:
 - `RATE_LIMIT_DEFAULT_PER_MIN` (default 60)
 - `LOG_LEVEL` (default INFO)
 - `LOG_JSON` (default true)
+
+Gamma ingestion uses `GLOBAL_MIN_LIQUIDITY` and `GLOBAL_MIN_VOLUME_24H` as server-side filters
+when they are greater than zero (with local validation still applied).
 
 ## Migrations
 
