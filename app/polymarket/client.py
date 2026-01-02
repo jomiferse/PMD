@@ -1,9 +1,12 @@
 import json
+import logging
 from datetime import datetime, timezone
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
 from .schemas import PolymarketMarket
 from ..settings import settings
+
+logger = logging.getLogger(__name__)
 
 
 class PolymarketClient:
@@ -18,6 +21,7 @@ class PolymarketClient:
         limit: int | None = None,
         max_events: int | None = None,
         start_offset: int | None = None,
+        max_pages: int | None = None,
         order: str | None = None,
         ascending: bool | None = None,
     ) -> list[PolymarketMarket]:
@@ -26,32 +30,48 @@ class PolymarketClient:
         - GET /events?active=true&closed=false&limit=N&offset=K
         - Each event contains a list of 'markets'
         - Each market has outcomePrices as a JSON-string array: '["0.12","0.88"]'
+        - If order/ascending are set, they are passed through to Gamma; otherwise API order applies
         """
         page_limit = _coerce_non_negative_int(limit or settings.POLY_PAGE_LIMIT)
-        max_events = _coerce_non_negative_int(max_events or settings.POLY_MAX_EVENTS)
+        max_events = _coerce_optional_non_negative_int(
+            settings.POLY_MAX_EVENTS if max_events is None else max_events
+        )
+        max_pages = _coerce_optional_non_negative_int(
+            settings.POLY_MAX_PAGES if max_pages is None else max_pages
+        )
         offset = _coerce_non_negative_int(
             settings.POLY_START_OFFSET if start_offset is None else start_offset
         )
         order = settings.POLY_ORDER if order is None else order
         ascending = settings.POLY_ASCENDING if ascending is None else ascending
-        if page_limit == 0 or max_events == 0 or offset >= max_events:
+        if page_limit == 0:
+            return []
+        if max_events is not None and (max_events == 0 or offset >= max_events):
             return []
 
         markets: list[PolymarketMarket] = []
         url = f"{self.base_url}/events"
         fetched_events = 0
+        page_count = 0
 
         async with httpx.AsyncClient(timeout=15) as client:
             while True:
-                remaining = max_events - fetched_events
-                if remaining <= 0 or offset >= max_events:
+                if max_events is not None and fetched_events >= max_events:
+                    break
+                if max_pages is not None and page_count >= max_pages:
+                    logger.warning(
+                        "polymarket_pagination_max_pages_reached max_pages=%s fetched_events=%s offset=%s",
+                        max_pages,
+                        fetched_events,
+                        offset,
+                    )
                     break
 
-                page_size = min(page_limit, remaining)
                 params = _build_events_params(
-                    limit=page_size, offset=offset, order=order, ascending=ascending
+                    limit=page_limit, offset=offset, order=order, ascending=ascending
                 )
                 events = await self._fetch_events_page(client, url, params)
+                page_count += 1
 
                 if not events:
                     break
@@ -59,10 +79,13 @@ class PolymarketClient:
                 fetched_events += len(events)
                 markets.extend(_parse_markets(events))
 
-                if len(events) < page_size:
+                if max_events is not None and fetched_events >= max_events:
                     break
 
-                offset += page_size
+                if len(events) < page_limit:
+                    break
+
+                offset += page_limit
 
         return markets
 
@@ -88,6 +111,15 @@ def _coerce_non_negative_int(value: int | None) -> int:
         return max(int(value or 0), 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _coerce_optional_non_negative_int(value: int | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return None
 
 
 def _build_events_params(
