@@ -1,9 +1,10 @@
-# PMD - Polymarket Mispricing Detector (MVP v1)
+# PMD - Polymarket Mispricing Detector (v2.3)
 
 Read-only analytics. Not financial advice. No guarantee of outcomes. No custody. No execution.
 
 PMD ingests Polymarket Gamma data, stores 5-minute snapshots, and emits dislocation alerts
 based on percentage price movement over a time window. It does not execute trades.
+Alerts are delivered as per-user Telegram digests with operator-managed preferences.
 
 ## Quick start
 
@@ -45,6 +46,9 @@ curl -H "X-API-Key: <key>" http://localhost:8000/alerts/latest
 - `GET /alerts/latest` (auth)
 - `GET /alerts/summary` (auth)
 - `GET /status` (auth)
+- `GET /admin/users` (admin)
+- `GET /admin/users/{id}/last-digest` (admin)
+- `GET /admin/stats` (admin)
 
 ## Alert logic (dislocation)
 
@@ -55,6 +59,7 @@ An alert triggers when:
 - The same market has not alerted within `ALERT_COOLDOWN_MINUTES`
 
 Alerts store old/new price, delta percent, and the trigger timestamp.
+Per-user delivery applies preference filters at digest time and logs alert deliveries.
 
 ## Environment variables
 
@@ -75,6 +80,11 @@ Optional:
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_CHAT_ID`
 - `TELEGRAM_THROTTLE_SECONDS` (default 900)
+- `ADMIN_API_KEY`
+- `GLOBAL_MIN_LIQUIDITY` (default 1000)
+- `GLOBAL_MIN_VOLUME_24H` (default 1000)
+- `GLOBAL_DIGEST_WINDOW` (default 60)
+- `GLOBAL_MAX_ALERTS` (default 7)
 - `DEFAULT_TENANT_ID` (default "default")
 - `RATE_LIMIT_DEFAULT_PER_MIN` (default 60)
 - `LOG_LEVEL` (default INFO)
@@ -99,8 +109,34 @@ Keys are stored hashed in the database.
 
 ## Telegram alerts
 
-Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env` and restart the services.
-Alerts are throttled per market using `TELEGRAM_THROTTLE_SECONDS` to prevent spam.
+Set `TELEGRAM_BOT_TOKEN` in `.env` and restart the services.
+Each user has their own `telegram_chat_id` and preferences that override global defaults.
+
+## User management
+
+Add a user:
+
+```bash
+docker compose exec api python -m app.scripts.manage_users add --name "Alice" --chat-id -12345
+```
+
+Disable a user:
+
+```bash
+docker compose exec api python -m app.scripts.manage_users disable --user Alice
+```
+
+Update preferences:
+
+```bash
+docker compose exec api python -m app.scripts.manage_users set-pref --user Alice --min-liquidity 50000
+```
+
+Send a test Telegram message:
+
+```bash
+docker compose exec api python -m app.scripts.manage_users test --user Alice
+```
 
 ## Scheduler
 
