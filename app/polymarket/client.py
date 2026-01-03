@@ -236,7 +236,7 @@ def _parse_markets(
                 continue
 
             source_ts = _parse_ts(m.get("lastUpdated") or m.get("updatedAt") or m.get("timestamp"))
-            volume_1w = _parse_float(m.get("volume1w") or m.get("volume7d"))
+            volume_1w = _parse_float(m.get("volume1wk") or m.get("volume1w") or m.get("volume7d"))
             best_ask = _parse_float(m.get("bestAsk"))
             last_trade_price = _parse_float(m.get("lastTradePrice") or m.get("lastTradePriceNum"))
 
