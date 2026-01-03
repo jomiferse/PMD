@@ -134,49 +134,20 @@ async def _send_user_digest(db: Session, tenant_id: str, config: UserDigestConfi
         return {"user_id": str(config.user_id), "sent": False, "reason": "no_alerts"}
 
     included_alerts, filtered_out = _filter_alerts_for_user(rows, config)
-    strong_alerts = [a for a in included_alerts if a.strength == AlertStrength.STRONG.value]
-    medium_alerts = [a for a in included_alerts if a.strength == AlertStrength.MEDIUM.value]
 
-    strong_ranked = _dedupe_by_market_id(_rank_alerts(strong_alerts))
-    medium_ranked = _dedupe_by_market_id(
-        _rank_alerts(medium_alerts),
-        exclude_market_ids={alert.market_id for alert in strong_ranked},
-    )
-
-    if not strong_ranked:
-        _record_alert_deliveries(
-            db,
-            filtered_out,
-            included_alerts,
-            config.user_id,
-            now_ts,
-            sent_alert_ids=set(),
-            skip_reason="no_strong_alerts",
-        )
-        return {"user_id": str(config.user_id), "sent": False, "reason": "no_strong_alerts"}
-
-    selected_strong = strong_ranked[: config.max_alerts_per_digest]
-    remaining = max(config.max_alerts_per_digest - len(selected_strong), 0)
-    selected_medium = medium_ranked[:remaining] if remaining > 0 else []
-    selected_alerts = selected_strong + selected_medium
-
-    if not selected_alerts:
-        _record_alert_deliveries(
-            db,
-            filtered_out,
-            included_alerts,
-            config.user_id,
-            now_ts,
-            sent_alert_ids=set(),
-            skip_reason="no_selected_alerts",
-        )
-        return {"user_id": str(config.user_id), "sent": False, "reason": "no_selected_alerts"}
+    pyes_filtered: list[Alert] = []
+    pyes_candidates: list[Alert] = []
+    for alert in included_alerts:
+        if not _is_within_actionable_pyes(alert):
+            pyes_filtered.append(alert)
+            continue
+        pyes_candidates.append(alert)
 
     if not config.telegram_chat_id:
         _record_alert_deliveries(
             db,
-            filtered_out,
-            included_alerts,
+            filtered_out + pyes_filtered,
+            pyes_candidates,
             config.user_id,
             now_ts,
             sent_alert_ids=set(),
@@ -195,6 +166,67 @@ async def _send_user_digest(db: Session, tenant_id: str, config: UserDigestConfi
         classification_cache[key] = classification
         return classification
 
+    actionable_alerts: list[Alert] = []
+    non_actionable_alerts: list[Alert] = []
+    for alert in pyes_candidates:
+        classification = classifier(alert)
+        if _is_actionable_classification(classification):
+            actionable_alerts.append(alert)
+        else:
+            non_actionable_alerts.append(alert)
+
+    actionable_ranked = _dedupe_by_market_id(_rank_alerts(actionable_alerts))
+    total_actionable = len(actionable_ranked)
+    filtered_for_delivery = filtered_out + pyes_filtered
+    if settings.DIGEST_ACTIONABLE_ONLY:
+        filtered_for_delivery += non_actionable_alerts
+    included_for_delivery = actionable_alerts if settings.DIGEST_ACTIONABLE_ONLY else pyes_candidates
+
+    if total_actionable < 1:
+        _record_alert_deliveries(
+            db,
+            filtered_for_delivery,
+            included_for_delivery,
+            config.user_id,
+            now_ts,
+            sent_alert_ids=set(),
+            skip_reason="no_actionable_alerts",
+        )
+        return {"user_id": str(config.user_id), "sent": False, "reason": "no_actionable_alerts"}
+
+    max_alerts = min(
+        max(config.max_alerts_per_digest, 1),
+        max(settings.MAX_ACTIONABLE_PER_DIGEST, 1),
+    )
+
+    selected_actionable = actionable_ranked[:max_alerts]
+    selected_alerts = selected_actionable
+    if not settings.DIGEST_ACTIONABLE_ONLY:
+        strong_alerts = [a for a in pyes_candidates if a.strength == AlertStrength.STRONG.value]
+        medium_alerts = [a for a in pyes_candidates if a.strength == AlertStrength.MEDIUM.value]
+
+        strong_ranked = _dedupe_by_market_id(_rank_alerts(strong_alerts))
+        medium_ranked = _dedupe_by_market_id(
+            _rank_alerts(medium_alerts),
+            exclude_market_ids={alert.market_id for alert in strong_ranked},
+        )
+        selected_strong = strong_ranked[:max_alerts]
+        remaining = max(max_alerts - len(selected_strong), 0)
+        selected_medium = medium_ranked[:remaining] if remaining > 0 else []
+        selected_alerts = selected_strong + selected_medium
+
+    if not selected_alerts:
+        _record_alert_deliveries(
+            db,
+            filtered_for_delivery,
+            included_for_delivery,
+            config.user_id,
+            now_ts,
+            sent_alert_ids=set(),
+            skip_reason="no_selected_alerts",
+        )
+        return {"user_id": str(config.user_id), "sent": False, "reason": "no_selected_alerts"}
+
     counts = {"REPRICING": 0, "LIQUIDITY_SWEEP": 0, "NOISY": 0}
     for alert in selected_alerts:
         classification = classifier(alert)
@@ -209,19 +241,17 @@ async def _send_user_digest(db: Session, tenant_id: str, config: UserDigestConfi
     )
 
     text = _format_digest_message(
-        selected_strong,
-        selected_medium,
+        selected_alerts,
         window_minutes,
-        total_strong=len(strong_alerts),
-        total_medium=len(medium_alerts),
+        total_actionable=total_actionable,
         user_name=config.name,
         classifier=classifier,
     )
     if not text:
         _record_alert_deliveries(
             db,
-            filtered_out,
-            included_alerts,
+            filtered_for_delivery,
+            included_for_delivery,
             config.user_id,
             now_ts,
             sent_alert_ids=set(),
@@ -240,21 +270,20 @@ async def _send_user_digest(db: Session, tenant_id: str, config: UserDigestConfi
         async with httpx.AsyncClient(timeout=10) as client:
             response = await client.post(url, json=payload)
         if response.is_success:
-            _record_digest_sent(config.user_id, tenant_id, now_ts, window_minutes, strong_alerts, medium_alerts)
+            _record_digest_sent(config.user_id, tenant_id, now_ts, window_minutes, actionable_alerts, [])
             _record_alert_deliveries(
                 db,
-                filtered_out,
-                included_alerts,
+                filtered_for_delivery,
+                included_for_delivery,
                 config.user_id,
                 now_ts,
                 sent_alert_ids={alert.id for alert in selected_alerts if alert.id is not None},
             )
             logger.info(
-                "digest_sent user_id=%s window_minutes=%s strong=%s medium=%s",
+                "digest_sent user_id=%s window_minutes=%s actionable=%s",
                 config.user_id,
                 window_minutes,
-                len(strong_alerts),
-                len(medium_alerts),
+                len(actionable_alerts),
             )
             return {"user_id": str(config.user_id), "sent": True, "status_code": response.status_code}
 
@@ -266,8 +295,8 @@ async def _send_user_digest(db: Session, tenant_id: str, config: UserDigestConfi
         )
         _record_alert_deliveries(
             db,
-            filtered_out,
-            included_alerts,
+            filtered_for_delivery,
+            included_for_delivery,
             config.user_id,
             now_ts,
             sent_alert_ids=set(),
@@ -283,8 +312,8 @@ async def _send_user_digest(db: Session, tenant_id: str, config: UserDigestConfi
         logger.exception("telegram_send_failed user_id=%s", config.user_id)
         _record_alert_deliveries(
             db,
-            filtered_out,
-            included_alerts,
+            filtered_for_delivery,
+            included_for_delivery,
             config.user_id,
             now_ts,
             sent_alert_ids=set(),
@@ -444,34 +473,31 @@ def _dedupe_by_market_id(
 
 
 def _format_digest_message(
-    strong_alerts: list[Alert],
-    medium_alerts: list[Alert],
+    alerts: list[Alert],
     window_minutes: int,
-    total_strong: int,
-    total_medium: int,
+    total_actionable: int,
     user_name: str | None = None,
     classifier=None,
 ) -> str:
-    if not strong_alerts:
+    if total_actionable < 1:
         return ""
 
-    name_suffix = f" for {html.escape(user_name)}" if user_name else ""
-    header = f"<b>PMD - Market Dislocation Digest{name_suffix} ({window_minutes}m)</b>"
-    summary = f"{total_strong} STRONG / {total_medium} NOTABLE moves detected"
-    lines = [header, summary, ""]
+    header = f"<b>PMD — {total_actionable} actionable repricings ({window_minutes}m)</b>"
+    lines = [header, ""]
 
-    ranked_alerts = _rank_digest_alerts(strong_alerts + medium_alerts)
-    display_cap = 7
-    display_alerts = ranked_alerts[:display_cap]
-    for idx, alert in enumerate(display_alerts, start=1):
-        lines.extend(_format_digest_alert(alert, idx, window_minutes, classifier))
+    actionable_displayed = 0
+    for idx, alert in enumerate(alerts, start=1):
+        classification = classifier(alert) if classifier else classify_alert(alert)
+        if _is_actionable_classification(classification):
+            actionable_displayed += 1
+        lines.extend(_format_digest_alert(alert, idx, window_minutes, classifier, classification=classification))
         lines.append("")
 
-    if len(ranked_alerts) > len(display_alerts):
-        remaining = len(ranked_alerts) - len(display_alerts)
-        lines.extend([f"+{remaining} more moves not shown", ""])
+    remaining_actionable = total_actionable - actionable_displayed
+    if remaining_actionable > 0:
+        lines.extend([f"+{remaining_actionable} more actionable repricings not shown", ""])
 
-    lines.append("<i>Read-only analytics - Not financial advice</i>")
+    lines.append("<i>Read-only analytics • Not financial advice</i>")
     return "\n".join(lines).strip()
 
 
@@ -480,12 +506,13 @@ def _format_digest_alert(
     idx: int,
     window_minutes: int,
     classifier=None,
+    classification: AlertClassification | None = None,
 ) -> list[str]:
     title = html.escape(alert.title[:120])
-    rank_label = "STRONG" if alert.strength == AlertStrength.STRONG.value else "NOTABLE"
+    classification = classification or (classifier(alert) if classifier else classify_alert(alert))
+    rank_label = "STRONG" if _is_actionable_classification(classification) else "NOTABLE"
     move_text = _format_move(alert)
     p_yes_text = _format_p_yes(alert)
-    classification = classifier(alert) if classifier else classify_alert(alert)
     liquidity_text = _format_liquidity_volume(alert)
     return [
         f"<b>#{idx} {rank_label} - {classification.signal_type} ({classification.confidence})</b>",
@@ -522,6 +549,20 @@ def _rank_digest_alerts(alerts: list[Alert]) -> list[Alert]:
         ),
         reverse=True,
     )
+
+
+def _is_actionable_classification(classification: AlertClassification) -> bool:
+    return (
+        classification.signal_type == "REPRICING"
+        and classification.confidence == "HIGH"
+        and classification.suggested_action == "FOLLOW"
+    )
+
+
+def _is_within_actionable_pyes(alert: Alert) -> bool:
+    if alert.market_p_yes is None:
+        return True
+    return settings.PYES_ACTIONABLE_MIN <= alert.market_p_yes <= settings.PYES_ACTIONABLE_MAX
 
 
 def _signed_price_delta(alert: Alert) -> float:
