@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     GLOBAL_MIN_VOLUME_24H: float = 1000.0
     GLOBAL_DIGEST_WINDOW: int = 60
     GLOBAL_MAX_ALERTS: int = 7
+    PYES_ACTIONABLE_MIN: float = 0.15
+    PYES_ACTIONABLE_MAX: float = 0.85
+    MAX_ACTIONABLE_PER_DIGEST: int = 5
+    DIGEST_ACTIONABLE_ONLY: bool = True
 
     DEFAULT_TENANT_ID: str = "default"
     RATE_LIMIT_DEFAULT_PER_MIN: int = 60
