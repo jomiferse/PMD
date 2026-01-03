@@ -35,17 +35,16 @@ def test_digest_formatting_is_utf8_safe():
     alert = _make_alert()
 
     text = _format_digest_message(
-        strong_alerts=[alert],
-        medium_alerts=[],
+        alerts=[alert],
         window_minutes=60,
-        total_strong=1,
-        total_medium=0,
+        total_actionable=1,
         user_name="Alice",
     )
 
     assert text
     text.encode("utf-8")
     assert "\ufffd" not in text
+    assert "PMD — 1 actionable repricings (60m)" in text
     assert "NOTABLE notable" not in text
     assert "Move:" in text
     assert "Liquidity:" in text
@@ -58,11 +57,9 @@ def test_digest_formatting_is_utf8_safe():
 def test_digest_includes_p_yes_delta_when_available():
     alert = _make_alert(prev_market_p_yes=0.4, market_p_yes=0.6)
     text = _format_digest_message(
-        strong_alerts=[alert],
-        medium_alerts=[],
+        alerts=[alert],
         window_minutes=60,
-        total_strong=1,
-        total_medium=0,
+        total_actionable=1,
         user_name="Alice",
     )
     assert "p_yes: 40.0% -> 60.0%" in text
@@ -71,11 +68,9 @@ def test_digest_includes_p_yes_delta_when_available():
 def test_digest_falls_back_to_p_yes_now_when_missing_prev():
     alert = _make_alert(prev_market_p_yes=None, market_p_yes=0.52)
     text = _format_digest_message(
-        strong_alerts=[alert],
-        medium_alerts=[],
+        alerts=[alert],
         window_minutes=60,
-        total_strong=1,
-        total_medium=0,
+        total_actionable=1,
         user_name="Alice",
     )
     assert "p_yes now: 52.0%" in text
