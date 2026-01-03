@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     POLY_VOLUME_MIN: float | None = None
     POLY_USE_GLOBAL_MINIMUMS: bool = True
     INGEST_INTERVAL_SECONDS: int = 300
+    SNAPSHOT_RETENTION_DAYS: int = 7
+    ALERT_RETENTION_DAYS: int = 30
+    DELIVERY_RETENTION_DAYS: int = 30
+    CLEANUP_ENABLED: bool = True
+    CLEANUP_SCHEDULE_HOUR_UTC: int = 3
 
     MIN_LIQUIDITY: float = 1000.0
     MIN_VOLUME_24H: float = 1000.0

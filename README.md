@@ -81,6 +81,11 @@ Optional:
 - `POLY_VOLUME_MIN` (default unset/None)
 - `POLY_USE_GLOBAL_MINIMUMS` (default true)
 - `INGEST_INTERVAL_SECONDS` (default 300)
+- `CLEANUP_ENABLED` (default true)
+- `CLEANUP_SCHEDULE_HOUR_UTC` (default 3)
+- `SNAPSHOT_RETENTION_DAYS` (default 7)
+- `ALERT_RETENTION_DAYS` (default 30)
+- `DELIVERY_RETENTION_DAYS` (default 30)
 - `MIN_LIQUIDITY` (default 1000)
 - `MIN_VOLUME_24H` (default 1000)
 - `WINDOW_MINUTES` (default 60)
@@ -156,6 +161,8 @@ docker compose exec api python -m app.scripts.manage_users test --user Alice
 ## Scheduler
 
 The `scheduler` service enqueues ingestion jobs every `INGEST_INTERVAL_SECONDS`.
+Cleanup runs once per day after `CLEANUP_SCHEDULE_HOUR_UTC` (UTC) when enabled, and
+deletes rows older than the configured retention windows.
 You can also trigger a manual ingest by calling `POST /jobs/ingest`.
 
 ## Smoke test

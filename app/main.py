@@ -207,6 +207,15 @@ def admin_stats(
     _=Depends(admin_key_auth),
 ):
     since = datetime.now(timezone.utc) - timedelta(hours=24)
+    snapshot_count = db.query(func.count()).select_from(MarketSnapshot).scalar()
+    alert_count = db.query(func.count()).select_from(Alert).scalar()
+    delivery_count = db.query(func.count()).select_from(AlertDelivery).scalar()
+    snapshot_oldest = db.query(func.min(MarketSnapshot.asof_ts)).scalar()
+    snapshot_newest = db.query(func.max(MarketSnapshot.asof_ts)).scalar()
+    alert_oldest = db.query(func.min(Alert.triggered_at)).scalar()
+    alert_newest = db.query(func.max(Alert.triggered_at)).scalar()
+    delivery_oldest = db.query(func.min(AlertDelivery.delivered_at)).scalar()
+    delivery_newest = db.query(func.max(AlertDelivery.delivered_at)).scalar()
     active_users = (
         db.query(func.count())
         .select_from(User)
@@ -233,6 +242,15 @@ def admin_stats(
         "active_users": active_users or 0,
         "alerts_generated": alerts_generated or 0,
         "alerts_delivered": alerts_delivered or 0,
+        "snapshot_count": snapshot_count or 0,
+        "alert_count": alert_count or 0,
+        "delivery_count": delivery_count or 0,
+        "snapshot_oldest": snapshot_oldest.isoformat() if snapshot_oldest else None,
+        "snapshot_newest": snapshot_newest.isoformat() if snapshot_newest else None,
+        "alert_oldest": alert_oldest.isoformat() if alert_oldest else None,
+        "alert_newest": alert_newest.isoformat() if alert_newest else None,
+        "delivery_oldest": delivery_oldest.isoformat() if delivery_oldest else None,
+        "delivery_newest": delivery_newest.isoformat() if delivery_newest else None,
     }
 
 

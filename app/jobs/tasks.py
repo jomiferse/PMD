@@ -1,9 +1,9 @@
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import redis
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -141,6 +141,71 @@ async def run_ingest_and_alert(db: Session) -> dict:
             logger.exception("ingest_status_update_failed")
 
 
+def run_cleanup(db: Session) -> dict:
+    if not settings.CLEANUP_ENABLED:
+        logger.info("cleanup_skipped disabled=true")
+        return {"ok": False, "disabled": True}
+
+    now_ts = datetime.now(timezone.utc)
+    snapshots_cutoff = now_ts - timedelta(days=settings.SNAPSHOT_RETENTION_DAYS)
+    alerts_cutoff = now_ts - timedelta(days=settings.ALERT_RETENTION_DAYS)
+    deliveries_cutoff = now_ts - timedelta(days=settings.DELIVERY_RETENTION_DAYS)
+
+    snapshots_column = _pick_column(db, "market_snapshots", ["asof_ts", "source_ts"])
+    alerts_column = _pick_column(db, "alerts", ["triggered_at", "created_at"])
+    deliveries_column = _pick_column(db, "alert_deliveries", ["delivered_at", "created_at"])
+
+    deleted_snapshots = 0
+    deleted_alerts = 0
+    deleted_deliveries = 0
+
+    if snapshots_column:
+        deleted_snapshots = _delete_older_than(
+            db, "market_snapshots", snapshots_column, snapshots_cutoff
+        )
+        logger.info(
+            "cleanup_deleted table=market_snapshots column=%s cutoff=%s count=%s",
+            snapshots_column,
+            snapshots_cutoff.isoformat(),
+            deleted_snapshots,
+        )
+    else:
+        logger.warning("cleanup_skipped table=market_snapshots reason=missing_column")
+
+    if alerts_column:
+        deleted_alerts = _delete_older_than(db, "alerts", alerts_column, alerts_cutoff)
+        logger.info(
+            "cleanup_deleted table=alerts column=%s cutoff=%s count=%s",
+            alerts_column,
+            alerts_cutoff.isoformat(),
+            deleted_alerts,
+        )
+    else:
+        logger.warning("cleanup_skipped table=alerts reason=missing_column")
+
+    if deliveries_column:
+        deleted_deliveries = _delete_older_than(
+            db, "alert_deliveries", deliveries_column, deliveries_cutoff
+        )
+        logger.info(
+            "cleanup_deleted table=alert_deliveries column=%s cutoff=%s count=%s",
+            deliveries_column,
+            deliveries_cutoff.isoformat(),
+            deleted_deliveries,
+        )
+    else:
+        logger.warning("cleanup_skipped table=alert_deliveries reason=missing_column")
+
+    db.commit()
+    return {
+        "ok": True,
+        "snapshots_deleted": deleted_snapshots,
+        "alerts_deleted": deleted_alerts,
+        "deliveries_deleted": deleted_deliveries,
+        "ts": now_ts.isoformat(),
+    }
+
+
 def _snapshot_bucket(ts: datetime) -> datetime:
     minute = (ts.minute // 5) * 5
     return ts.replace(minute=minute, second=0, microsecond=0)
@@ -161,6 +226,20 @@ def _table_columns(db: Session, table_name: str) -> set[str]:
     except Exception:
         logger.exception("inspect_table_columns_failed table=%s", table_name)
         return set()
+
+
+def _pick_column(db: Session, table_name: str, candidates: list[str]) -> str | None:
+    columns = _table_columns(db, table_name)
+    for candidate in candidates:
+        if candidate in columns:
+            return candidate
+    return None
+
+
+def _delete_older_than(db: Session, table_name: str, column_name: str, cutoff: datetime) -> int:
+    stmt = text(f"DELETE FROM {table_name} WHERE {column_name} < :cutoff")
+    result = db.execute(stmt, {"cutoff": cutoff})
+    return int(result.rowcount or 0)
 
 
 OPTIONAL_ALERT_COLUMNS = {
