@@ -79,8 +79,8 @@ class Alert(Base):
     snapshot_bucket: Mapped[DateTime] = mapped_column(DateTime, nullable=False)
     source_ts: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
     message: Mapped[str] = mapped_column(String(1024), default="")
-    triggered_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), index=True)
-    created_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), index=True)
+    triggered_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now())
+    created_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now())
 
 
 class User(Base):
@@ -115,6 +115,7 @@ class AlertDelivery(Base):
     __table_args__ = (
         UniqueConstraint("alert_id", "user_id", name="uq_alert_delivery_alert_user"),
         Index("ix_alert_deliveries_user_status", "user_id", "delivery_status"),
+        Index("ix_alert_deliveries_delivered_at", "delivered_at"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
