@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 import json
 
 import redis
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 from rq import Queue
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -11,11 +11,19 @@ from .db import get_db
 from .auth import admin_key_auth
 from .jobs.run import job_sync_wrapper
 from .logging import configure_logging
-from .models import Alert, AlertDelivery, MarketSnapshot, User, UserAlertPreference
+from .models import (
+    AiRecommendation,
+    Alert,
+    AlertDelivery,
+    MarketSnapshot,
+    User,
+    UserAlertPreference,
+)
 from .rate_limit import rate_limit
 from .settings import settings
 from .core.alerts import USER_DIGEST_LAST_PAYLOAD_KEY
 from .core.alert_classification import classify_alert_with_snapshots
+from .core.ai_copilot import handle_telegram_callback
 
 configure_logging()
 
@@ -177,6 +185,11 @@ def admin_users(
                 "alert_strengths": pref.alert_strengths,
                 "digest_window_minutes": pref.digest_window_minutes,
                 "max_alerts_per_digest": pref.max_alerts_per_digest,
+                "ai_copilot_enabled": pref.ai_copilot_enabled,
+                "risk_budget_usd_per_day": pref.risk_budget_usd_per_day,
+                "max_usd_per_trade": pref.max_usd_per_trade,
+                "max_liquidity_fraction": pref.max_liquidity_fraction,
+                "fast_signals_enabled": pref.fast_signals_enabled,
                 "created_at": pref.created_at.isoformat(),
             }
             if pref
@@ -199,6 +212,40 @@ def admin_user_last_digest(
         return {"user_id": user_id, "last_digest": json.loads(payload)}
     except Exception:
         return {"user_id": user_id, "last_digest": None}
+
+
+@app.get("/admin/ai-recommendations")
+def admin_ai_recommendations(
+    db: Session = Depends(get_db),
+    _=Depends(admin_key_auth),
+    limit: int = 50,
+):
+    rows = (
+        db.query(AiRecommendation)
+        .order_by(AiRecommendation.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return [
+        {
+            "id": rec.id,
+            "user_id": str(rec.user_id),
+            "alert_id": rec.alert_id,
+            "created_at": rec.created_at.isoformat(),
+            "recommendation": rec.recommendation,
+            "confidence": rec.confidence,
+            "rationale": rec.rationale,
+            "risks": rec.risks,
+            "draft_side": rec.draft_side,
+            "draft_price": rec.draft_price,
+            "draft_size": rec.draft_size,
+            "draft_notional_usd": rec.draft_notional_usd,
+            "status": rec.status,
+            "telegram_message_id": rec.telegram_message_id,
+            "expires_at": rec.expires_at.isoformat() if rec.expires_at else None,
+        }
+        for rec in rows
+    ]
 
 
 @app.get("/admin/stats")
@@ -252,6 +299,12 @@ def admin_stats(
         "delivery_oldest": delivery_oldest.isoformat() if delivery_oldest else None,
         "delivery_newest": delivery_newest.isoformat() if delivery_newest else None,
     }
+
+
+@app.post("/telegram/webhook")
+async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
+    payload = await request.json()
+    return handle_telegram_callback(db, payload)
 
 
 @app.get("/status")

@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import String, Float, DateTime, Integer, Boolean, ForeignKey, func, UniqueConstraint, Index, text
+from sqlalchemy import String, Float, DateTime, Integer, Boolean, ForeignKey, func, UniqueConstraint, Index, text, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from .db import Base
@@ -111,6 +111,11 @@ class UserAlertPreference(Base):
     alert_strengths: Mapped[str | None] = mapped_column(String(32), nullable=True)
     digest_window_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_alerts_per_digest: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ai_copilot_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    risk_budget_usd_per_day: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    max_usd_per_trade: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    max_liquidity_fraction: Mapped[float] = mapped_column(Float, default=0.01, nullable=False)
+    fast_signals_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), nullable=False)
 
 
@@ -131,3 +136,92 @@ class AlertDelivery(Base):
     )
     delivered_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), nullable=False)
     delivery_status: Mapped[str] = mapped_column(String(16), nullable=False)
+
+
+class AiRecommendation(Base):
+    __tablename__ = "ai_recommendations"
+    __table_args__ = (
+        Index("ix_ai_recommendations_user_status", "user_id", "status"),
+        Index("ix_ai_recommendations_created_at", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    alert_id: Mapped[int] = mapped_column(ForeignKey("alerts.id", ondelete="CASCADE"), nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), nullable=False)
+    recommendation: Mapped[str] = mapped_column(String(8), nullable=False)
+    confidence: Mapped[str] = mapped_column(String(8), nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
+    risks: Mapped[str] = mapped_column(Text, nullable=False)
+    draft_side: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    draft_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    draft_size: Mapped[float | None] = mapped_column(Float, nullable=True)
+    draft_notional_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="PROPOSED", nullable=False)
+    telegram_message_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    expires_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
+
+
+class AiMarketMute(Base):
+    __tablename__ = "ai_market_mutes"
+    __table_args__ = (
+        UniqueConstraint("user_id", "market_id", name="uq_ai_market_mutes_user_market"),
+        Index("ix_ai_market_mutes_expires_at", "expires_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    market_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    expires_at: Mapped[DateTime] = mapped_column(DateTime, nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), nullable=False)
+
+
+class AiThemeMute(Base):
+    __tablename__ = "ai_theme_mutes"
+    __table_args__ = (
+        UniqueConstraint("user_id", "theme_key", name="uq_ai_theme_mutes_user_theme"),
+        Index("ix_ai_theme_mutes_expires_at", "expires_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    theme_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    expires_at: Mapped[DateTime] = mapped_column(DateTime, nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), nullable=False)
+
+
+class AiRecommendationEvent(Base):
+    __tablename__ = "ai_recommendation_events"
+    __table_args__ = (
+        Index("ix_ai_recommendation_events_user_created", "user_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    recommendation_id: Mapped[int] = mapped_column(
+        ForeignKey("ai_recommendations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    alert_id: Mapped[int] = mapped_column(
+        ForeignKey("alerts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    details: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), nullable=False)

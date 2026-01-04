@@ -1,0 +1,298 @@
+import asyncio
+from datetime import datetime, timedelta, timezone
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from app.core.alert_classification import AlertClassification
+from app.core.alerts import UserDigestConfig, _enqueue_ai_recommendations, _send_user_digest
+from app.alerts.theme_key import extract_theme
+from app.db import Base
+from app.models import AiRecommendation, AiThemeMute, Alert
+from app.settings import settings
+
+
+@pytest.fixture()
+def db_session():
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(bind=engine)
+    SessionLocal = sessionmaker(bind=engine)
+    session = SessionLocal()
+    try:
+        yield session
+    finally:
+        session.close()
+
+
+class FakeRedis:
+    def __init__(self):
+        self.store = {}
+
+    def get(self, key):
+        return self.store.get(key)
+
+    def set(self, key, value, nx=False, ex=None):
+        if nx and key in self.store:
+            return None
+        self.store[key] = value
+        return True
+
+    def expire(self, key, ttl):
+        return True
+
+def _make_alert(**overrides):
+    now_ts = datetime.now(timezone.utc)
+    data = dict(
+        tenant_id="tenant-1",
+        alert_type="DISLOCATION",
+        market_id="market-1",
+        title="Sample Market",
+        category="testing",
+        move=0.05,
+        market_p_yes=0.5,
+        prev_market_p_yes=0.45,
+        old_price=0.45,
+        new_price=0.5,
+        delta_pct=0.05,
+        liquidity=10000.0,
+        volume_24h=12000.0,
+        strength="STRONG",
+        snapshot_bucket=now_ts,
+        source_ts=now_ts,
+        message="Test alert",
+        triggered_at=now_ts,
+        created_at=now_ts,
+    )
+    data.update(overrides)
+    return Alert(**data)
+
+
+def _make_config(user_id):
+    return UserDigestConfig(
+        user_id=user_id,
+        name="Trader",
+        telegram_chat_id="12345",
+        min_liquidity=0.0,
+        min_volume_24h=0.0,
+        min_abs_price_move=0.0,
+        alert_strengths={"STRONG", "MEDIUM"},
+        digest_window_minutes=60,
+        max_alerts_per_digest=10,
+        ai_copilot_enabled=True,
+        risk_budget_usd_per_day=100.0,
+        max_usd_per_trade=20.0,
+        max_liquidity_fraction=0.01,
+        fast_signals_enabled=False,
+    )
+
+
+def _patch_digest_helpers(monkeypatch):
+    monkeypatch.setattr("app.core.alerts._digest_recently_sent", lambda *args, **kwargs: False)
+    monkeypatch.setattr("app.core.alerts._record_digest_sent", lambda *args, **kwargs: None)
+
+
+def test_ai_enqueue_only_actionable_alerts(db_session, monkeypatch):
+    _patch_digest_helpers(monkeypatch)
+    user_id = uuid4()
+    alert = _make_alert(market_id="market-wait")
+    db_session.add(alert)
+    db_session.commit()
+
+    def _fake_classify(_, alert_arg):
+        return AlertClassification("LIQUIDITY_SWEEP", "MEDIUM", "WAIT")
+
+    monkeypatch.setattr("app.core.alerts.classify_alert_with_snapshots", _fake_classify)
+
+    enqueued = []
+    monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: enqueued.append(args))
+
+    class _FakeResponse:
+        is_success = True
+        status_code = 200
+        text = "ok"
+
+    class _FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json):
+            return _FakeResponse()
+
+    monkeypatch.setattr("app.core.alerts.httpx.AsyncClient", _FakeClient)
+
+    result = asyncio.run(_send_user_digest(db_session, "tenant-1", _make_config(user_id)))
+    assert result["sent"] is False
+    assert not enqueued
+
+
+def test_ai_enqueue_respects_daily_cap(db_session, monkeypatch):
+    user_id = uuid4()
+    alert = _make_alert(market_id="market-1")
+    db_session.add(alert)
+    db_session.commit()
+
+    db_session.add(
+        AiRecommendation(
+            user_id=user_id,
+            alert_id=alert.id,
+            recommendation="BUY",
+            confidence="HIGH",
+            rationale="test",
+            risks="test",
+            status="PROPOSED",
+            created_at=datetime.now(timezone.utc),
+        )
+    )
+    db_session.commit()
+
+    original_daily = settings.MAX_COPILOT_PER_DAY
+    settings.MAX_COPILOT_PER_DAY = 1
+    try:
+        enqueued = []
+        monkeypatch.setattr("app.core.alerts.redis_conn", FakeRedis())
+        monkeypatch.setattr(
+            "app.core.alerts.classify_alert_with_snapshots",
+            lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
+        )
+        monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: enqueued.append(args))
+        _enqueue_ai_recommendations(db_session, _make_config(user_id), [alert])
+        assert not enqueued
+    finally:
+        settings.MAX_COPILOT_PER_DAY = original_daily
+
+
+def test_ai_enqueue_respects_digest_cap(db_session, monkeypatch):
+    user_id = uuid4()
+    alerts = [
+        _make_alert(market_id="market-1", liquidity=20000.0),
+        _make_alert(market_id="market-2", liquidity=15000.0),
+    ]
+    db_session.add_all(alerts)
+    db_session.commit()
+
+    original_daily = settings.MAX_COPILOT_PER_DAY
+    original_digest = settings.MAX_COPILOT_THEMES_PER_DIGEST
+    settings.MAX_COPILOT_PER_DAY = 5
+    settings.MAX_COPILOT_THEMES_PER_DIGEST = 1
+    try:
+        enqueued = []
+        monkeypatch.setattr("app.core.alerts.redis_conn", FakeRedis())
+        monkeypatch.setattr(
+            "app.core.alerts.classify_alert_with_snapshots",
+            lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
+        )
+        monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: enqueued.append(args))
+        _enqueue_ai_recommendations(db_session, _make_config(user_id), alerts)
+        assert len(enqueued) == 1
+    finally:
+        settings.MAX_COPILOT_PER_DAY = original_daily
+        settings.MAX_COPILOT_THEMES_PER_DIGEST = original_digest
+
+
+def test_copilot_triggers_for_actionable_theme(db_session, monkeypatch):
+    user_id = uuid4()
+    alerts = [
+        _make_alert(
+            market_id="market-1",
+            title="Will the price of Bitcoin be above $50 on Jan 5 2026?",
+        ),
+        _make_alert(
+            market_id="market-2",
+            title="Will the price of Bitcoin be above $55 on Jan 5 2026?",
+        ),
+    ]
+    db_session.add_all(alerts)
+    db_session.commit()
+
+    enqueued = []
+    monkeypatch.setattr("app.core.alerts.redis_conn", FakeRedis())
+    monkeypatch.setattr(
+        "app.core.alerts.classify_alert_with_snapshots",
+        lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
+    )
+    monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: enqueued.append(args))
+
+    _enqueue_ai_recommendations(db_session, _make_config(user_id), alerts)
+    assert len(enqueued) == 1
+
+
+def test_copilot_skips_non_follow(db_session, monkeypatch):
+    user_id = uuid4()
+    alert = _make_alert(
+        market_id="market-1",
+        title="Will the price of Bitcoin be above $50 on Jan 5 2026?",
+    )
+    db_session.add(alert)
+    db_session.commit()
+
+    enqueued = []
+    monkeypatch.setattr("app.core.alerts.redis_conn", FakeRedis())
+    monkeypatch.setattr(
+        "app.core.alerts.classify_alert_with_snapshots",
+        lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "WAIT"),
+    )
+    monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: enqueued.append(args))
+
+    _enqueue_ai_recommendations(db_session, _make_config(user_id), [alert])
+    assert not enqueued
+
+
+def test_copilot_dedupe_by_theme_key(db_session, monkeypatch):
+    user_id = uuid4()
+    alert = _make_alert(
+        market_id="market-1",
+        title="Will the price of Bitcoin be above $50 on Jan 5 2026?",
+    )
+    db_session.add(alert)
+    db_session.commit()
+
+    enqueued = []
+    fake_redis = FakeRedis()
+    monkeypatch.setattr("app.core.alerts.redis_conn", fake_redis)
+    monkeypatch.setattr(
+        "app.core.alerts.classify_alert_with_snapshots",
+        lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
+    )
+    monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: enqueued.append(args))
+
+    _enqueue_ai_recommendations(db_session, _make_config(user_id), [alert])
+    _enqueue_ai_recommendations(db_session, _make_config(user_id), [alert])
+    assert len(enqueued) == 1
+
+
+def test_copilot_respects_theme_mute(db_session, monkeypatch):
+    user_id = uuid4()
+    alert = _make_alert(
+        market_id="market-1",
+        title="Will the price of Bitcoin be above $50 on Jan 5 2026?",
+    )
+    db_session.add(alert)
+    db_session.commit()
+
+    theme_key = extract_theme(alert.title, category=alert.category, slug=alert.market_id).theme_key
+    mute = AiThemeMute(
+        user_id=user_id,
+        theme_key=theme_key,
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=6),
+    )
+    db_session.add(mute)
+    db_session.commit()
+
+    enqueued = []
+    monkeypatch.setattr("app.core.alerts.redis_conn", FakeRedis())
+    monkeypatch.setattr(
+        "app.core.alerts.classify_alert_with_snapshots",
+        lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
+    )
+    monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: enqueued.append(args))
+
+    _enqueue_ai_recommendations(db_session, _make_config(user_id), [alert])
+    assert not enqueued

@@ -48,7 +48,9 @@ curl -H "X-API-Key: <key>" http://localhost:8000/alerts/latest
 - `GET /status` (auth)
 - `GET /admin/users` (admin)
 - `GET /admin/users/{id}/last-digest` (admin)
+- `GET /admin/ai-recommendations` (admin)
 - `GET /admin/stats` (admin)
+- `POST /telegram/webhook` (no auth; Telegram callback)
 
 ## Alert logic (dislocation)
 
@@ -92,6 +94,12 @@ Optional:
 - `ALERT_COOLDOWN_MINUTES` (default 30)
 - `TELEGRAM_BOT_TOKEN`
 - `ADMIN_API_KEY`
+- `OPENAI_API_KEY`
+- `LLM_API_BASE` (default `https://api.openai.com/v1/chat/completions`)
+- `LLM_MODEL` (default `gpt-4o-mini`)
+- `LLM_TIMEOUT_SECONDS` (default 15)
+- `LLM_MAX_RETRIES` (default 2)
+- `LLM_CACHE_TTL_SECONDS` (default 3600)
 - `GLOBAL_MIN_LIQUIDITY` (default 1000)
 - `GLOBAL_MIN_VOLUME_24H` (default 1000)
 - `GLOBAL_DIGEST_WINDOW` (default 60)
@@ -100,6 +108,24 @@ Optional:
 - `PYES_ACTIONABLE_MAX` (default 0.85)
 - `MAX_ACTIONABLE_PER_DIGEST` (default 5)
 - `DIGEST_ACTIONABLE_ONLY` (default true)
+- `THEME_GROUPING_ENABLED` (default true)
+- `MAX_THEMES_PER_DIGEST` (default 5)
+- `MAX_RELATED_MARKETS_PER_THEME` (default 3)
+- `MAX_AI_RECS_PER_DAY` (default 5)
+- `MAX_AI_RECS_PER_DIGEST` (default 2)
+- `AI_RECOMMENDATION_EXPIRES_MINUTES` (default 30)
+- `FAST_SIGNALS_ENABLED` (default false)
+- `FAST_WINDOW_MINUTES` (default 15)
+- `FAST_MIN_LIQUIDITY` (default 20000)
+- `FAST_MIN_VOLUME_24H` (default 20000)
+- `FAST_MIN_ABS_MOVE` (default 0.015)
+- `FAST_MIN_PCT_MOVE` (default 0.05)
+- `FAST_PYES_MIN` (default 0.15)
+- `FAST_PYES_MAX` (default 0.85)
+- `FAST_COOLDOWN_MINUTES` (default 10)
+- `FAST_MAX_THEMES_PER_DIGEST` (default 2)
+- `FAST_MAX_MARKETS_PER_THEME` (default 2)
+- `FAST_DIGEST_MODE` (default "separate")
 - `DEFAULT_TENANT_ID` (default "default")
 - `RATE_LIMIT_DEFAULT_PER_MIN` (default 60)
 - `LOG_LEVEL` (default INFO)
@@ -135,6 +161,26 @@ Keys are stored hashed in the database.
 
 Set `TELEGRAM_BOT_TOKEN` in `.env` and restart the services.
 Each user has their own `telegram_chat_id` and preferences that override global defaults.
+FAST watchlist signals are optional and gated by both `FAST_SIGNALS_ENABLED` and the
+per-user `fast_signals_enabled` preference.
+
+## AI Copilot (manual execution)
+
+When `ai_copilot_enabled` is true for a user, PMD generates read-only recommendations
+for actionable alerts and sends a Telegram message with a draft order block and
+Confirm/Skip/Mute buttons. Confirming does not place any order; PMD only returns a
+formatted payload for manual execution outside PMD.
+
+Required user preference fields:
+- `ai_copilot_enabled` (bool)
+- `risk_budget_usd_per_day` (float)
+- `max_usd_per_trade` (float)
+- `max_liquidity_fraction` (float)
+
+Safety constraints:
+- PMD never submits orders.
+- No private keys or trading endpoints are used.
+- Draft sizing is deterministic and conservative.
 
 ## User management
 
@@ -154,6 +200,12 @@ Update preferences:
 
 ```bash
 docker compose exec api python -m app.scripts.manage_users set-pref --user Alice --min-liquidity 50000
+```
+
+Enable FAST watchlist signals for a user:
+
+```bash
+docker compose exec api python -m app.scripts.manage_users set-pref --user Alice --fast-signals-enabled true
 ```
 
 Send a test Telegram message:

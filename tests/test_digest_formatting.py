@@ -44,13 +44,10 @@ def test_digest_formatting_is_utf8_safe():
     assert text
     text.encode("utf-8")
     assert "\ufffd" not in text
-    assert "PMD — 1 actionable repricings (60m)" in text
-    assert "NOTABLE notable" not in text
-    assert "Move:" in text
-    assert "Liquidity:" in text
-    assert "Suggested action:" in text
-    assert "LIQUIDITY_SWEEP" in text
-    assert "MEDIUM" in text
+    assert "PMD - 1 theme (60m)" in text
+    assert "Rep:" in text
+    assert "Move" in text
+    assert "Liq" in text
     assert "https://polymarket.com/market/market-1" in text
 
 
@@ -62,7 +59,7 @@ def test_digest_includes_p_yes_delta_when_available():
         total_actionable=1,
         user_name="Alice",
     )
-    assert "p_yes: 40.0% -> 60.0%" in text
+    assert "p_yes 40.0->60.0" in text
 
 
 def test_digest_falls_back_to_p_yes_now_when_missing_prev():
@@ -73,5 +70,28 @@ def test_digest_falls_back_to_p_yes_now_when_missing_prev():
         total_actionable=1,
         user_name="Alice",
     )
-    assert "p_yes now: 52.0%" in text
+    assert "p_yes 52.0" in text
     assert "->" not in text
+
+
+def test_digest_formats_yesno_as_p_yes():
+    alert = _make_alert(primary_outcome_label="Yes", is_yesno=True)
+    text = _format_digest_message(
+        alerts=[alert],
+        window_minutes=60,
+        total_actionable=1,
+        user_name="Alice",
+    )
+    assert "p_yes" in text
+
+
+def test_digest_formats_non_yesno_as_primary_label():
+    alert = _make_alert(primary_outcome_label="CAR", is_yesno=False)
+    text = _format_digest_message(
+        alerts=[alert],
+        window_minutes=60,
+        total_actionable=1,
+        user_name="Alice",
+    )
+    assert "p_CAR" in text
+    assert "p_yes" not in text

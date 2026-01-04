@@ -63,6 +63,11 @@ def _make_config():
         alert_strengths={"STRONG", "MEDIUM"},
         digest_window_minutes=60,
         max_alerts_per_digest=10,
+        ai_copilot_enabled=False,
+        risk_budget_usd_per_day=0.0,
+        max_usd_per_trade=0.0,
+        max_liquidity_fraction=0.01,
+        fast_signals_enabled=False,
     )
 
 
@@ -163,9 +168,9 @@ def test_digest_caps_actionable_items(db_session, monkeypatch):
     settings.MAX_ACTIONABLE_PER_DIGEST = 2
     try:
         alerts = [
-            _make_alert(market_id="market-1", move=0.2, old_price=0.4, new_price=0.6),
-            _make_alert(market_id="market-2", move=0.18, old_price=0.4, new_price=0.58),
-            _make_alert(market_id="market-3", move=0.16, old_price=0.4, new_price=0.56),
+            _make_alert(market_id="market-1", title="Market One", move=0.2, old_price=0.4, new_price=0.6),
+            _make_alert(market_id="market-2", title="Market Two", move=0.18, old_price=0.4, new_price=0.58),
+            _make_alert(market_id="market-3", title="Market Three", move=0.16, old_price=0.4, new_price=0.56),
         ]
         db_session.add_all(alerts)
         db_session.commit()
@@ -202,7 +207,7 @@ def test_digest_caps_actionable_items(db_session, monkeypatch):
         assert result["sent"] is True
         assert payloads
         text = payloads[0]["text"]
-        assert text.count("<b>#") == 2
+        assert text.count("THEME") == 2
     finally:
         settings.MAX_ACTIONABLE_PER_DIGEST = original_cap
 
@@ -245,4 +250,4 @@ def test_digest_header_format(db_session, monkeypatch):
     result = asyncio.run(_send_user_digest(db_session, "tenant-1", _make_config()))
     assert result["sent"] is True
     assert payloads
-    assert "PMD — 1 actionable repricings (60m)" in payloads[0]["text"]
+    assert "PMD - 1 theme (60m)" in payloads[0]["text"]

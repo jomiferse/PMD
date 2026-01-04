@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from ..polymarket.client import PolymarketClient
 from ..core.scoring import score_market
 from ..core.dislocation import compute_dislocation_alerts
+from ..core.fast_signals import compute_fast_signals
 from ..core.alerts import send_user_digests
 from ..settings import settings
 from ..models import MarketSnapshot, Alert
@@ -128,12 +129,48 @@ async def run_ingest_and_alert(db: Session) -> dict:
             db.execute(alert_stmt)
             db.commit()
 
+        fast_alerts: list[Alert] = []
+        if settings.FAST_SIGNALS_ENABLED:
+            fast_alerts = compute_fast_signals(
+                db=db,
+                snapshots=snapshot_rows,
+                window_minutes=settings.FAST_WINDOW_MINUTES,
+                min_liquidity=settings.FAST_MIN_LIQUIDITY,
+                min_volume_24h=settings.FAST_MIN_VOLUME_24H,
+                min_abs_move=settings.FAST_MIN_ABS_MOVE,
+                min_pct_move=settings.FAST_MIN_PCT_MOVE,
+                p_yes_min=settings.FAST_PYES_MIN,
+                p_yes_max=settings.FAST_PYES_MAX,
+                cooldown_minutes=settings.FAST_COOLDOWN_MINUTES,
+                tenant_id=settings.DEFAULT_TENANT_ID,
+                use_triggered_at=use_triggered_at,
+            )
+        if fast_alerts:
+            fast_rows = [a.__dict__ for a in fast_alerts]
+            for row in fast_rows:
+                row.pop("_sa_instance_state", None)
+                row.pop("id", None)
+                if alert_columns:
+                    for key in list(row.keys()):
+                        if key not in alert_columns:
+                            row.pop(key, None)
+                else:
+                    for key in OPTIONAL_ALERT_COLUMNS:
+                        row.pop(key, None)
+            fast_stmt = pg_insert(Alert).values(fast_rows)
+            fast_stmt = fast_stmt.on_conflict_do_nothing(
+                index_elements=["alert_type", "market_id", "snapshot_bucket"]
+            )
+            db.execute(fast_stmt)
+            db.commit()
+
         await send_user_digests(db, settings.DEFAULT_TENANT_ID)
 
         result = {
             "ok": True,
             "snapshots": len(snapshot_rows),
             "alerts": len(alerts),
+            "fast_alerts": len(fast_alerts),
         }
         return result
     except Exception:

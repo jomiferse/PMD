@@ -27,6 +27,17 @@ def _normalize_alert_strengths(value: str | None) -> str | None:
     return ",".join(parts) if parts else None
 
 
+def _parse_bool(value: str | None) -> bool | None:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"true", "1", "yes", "y"}:
+        return True
+    if normalized in {"false", "0", "no", "n"}:
+        return False
+    raise SystemExit(f"invalid boolean value: {value}")
+
+
 def add_user(args: argparse.Namespace) -> None:
     db = SessionLocal()
     try:
@@ -76,6 +87,16 @@ def set_preferences(args: argparse.Namespace) -> None:
             pref.digest_window_minutes = args.digest_window_minutes
         if args.max_alerts_per_digest is not None:
             pref.max_alerts_per_digest = args.max_alerts_per_digest
+        if args.ai_copilot_enabled is not None:
+            pref.ai_copilot_enabled = args.ai_copilot_enabled
+        if args.risk_budget_usd_per_day is not None:
+            pref.risk_budget_usd_per_day = args.risk_budget_usd_per_day
+        if args.max_usd_per_trade is not None:
+            pref.max_usd_per_trade = args.max_usd_per_trade
+        if args.max_liquidity_fraction is not None:
+            pref.max_liquidity_fraction = args.max_liquidity_fraction
+        if args.fast_signals_enabled is not None:
+            pref.fast_signals_enabled = args.fast_signals_enabled
 
         db.commit()
         print(f"updated preferences for {user.user_id}")
@@ -130,6 +151,11 @@ def build_parser() -> argparse.ArgumentParser:
     pref.add_argument("--alert-strengths", help="Comma list: STRONG or STRONG,MEDIUM")
     pref.add_argument("--digest-window-minutes", type=int)
     pref.add_argument("--max-alerts-per-digest", type=int)
+    pref.add_argument("--ai-copilot-enabled", type=_parse_bool)
+    pref.add_argument("--risk-budget-usd-per-day", type=float)
+    pref.add_argument("--max-usd-per-trade", type=float)
+    pref.add_argument("--max-liquidity-fraction", type=float)
+    pref.add_argument("--fast-signals-enabled", type=_parse_bool)
     pref.set_defaults(func=set_preferences)
 
     test = subparsers.add_parser("test", help="Send a test Telegram message to a user")
