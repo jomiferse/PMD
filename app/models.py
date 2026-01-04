@@ -20,6 +20,8 @@ class MarketSnapshot(Base):
     category: Mapped[str] = mapped_column(String(128), default="unknown")
 
     market_p_yes: Mapped[float] = mapped_column(Float)  # implied prob (0-1)
+    primary_outcome_label: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    is_yesno: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     liquidity: Mapped[float] = mapped_column(Float, default=0.0)
     volume_24h: Mapped[float] = mapped_column(Float, default=0.0)
     volume_1w: Mapped[float] = mapped_column(Float, default=0.0)
@@ -70,6 +72,8 @@ class Alert(Base):
     move: Mapped[float] = mapped_column(Float, default=0.0)
     market_p_yes: Mapped[float] = mapped_column(Float, default=0.0)
     prev_market_p_yes: Mapped[float] = mapped_column(Float, default=0.0)
+    primary_outcome_label: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    is_yesno: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     old_price: Mapped[float] = mapped_column(Float, default=0.0)
     new_price: Mapped[float] = mapped_column(Float, default=0.0)
     delta_pct: Mapped[float] = mapped_column(Float, default=0.0)

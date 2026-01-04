@@ -205,7 +205,7 @@ def _parse_markets(
             if m.get("active") is False or m.get("closed") is True:
                 continue
 
-            # Parse YES price from outcomePrices (stringified JSON array)
+            # Parse primary outcome price from outcomePrices (stringified JSON array)
             raw_prices = m.get("outcomePrices", "[]")
             try:
                 prices = json.loads(raw_prices) if isinstance(raw_prices, str) else raw_prices
@@ -216,9 +216,18 @@ def _parse_markets(
                 continue
 
             try:
-                p_yes = float(prices[0])
+                p_primary = float(prices[0])
             except (TypeError, ValueError, IndexError):
                 continue
+
+            outcome_labels = _parse_outcome_labels(
+                m.get("outcomes")
+                or m.get("outcomeNames")
+                or m.get("outcomeTokenNames")
+                or m.get("outcomeTokens")
+            )
+            primary_outcome_label = (outcome_labels[0].strip() if outcome_labels else "") or "OUTCOME_0"
+            is_yesno = _is_yesno_outcomes(outcome_labels)
 
             # Liquidity: prefer numeric fields if present
             liq = m.get("liquidityNum")
@@ -255,7 +264,9 @@ def _parse_markets(
                     market_id=market_id,
                     title=title,
                     category=event_title or str(event_slug),
-                    p_yes=p_yes,
+                    p_primary=p_primary,
+                    primary_outcome_label=primary_outcome_label,
+                    is_yesno=is_yesno,
                     liquidity=liquidity,
                     volume_24h=volume_24h,
                     volume_1w=volume_1w,
@@ -266,6 +277,38 @@ def _parse_markets(
             )
 
     return markets, parsed_count
+
+
+def _parse_outcome_labels(raw) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+    if isinstance(raw, list):
+        labels: list[str] = []
+        for item in raw:
+            if isinstance(item, str):
+                if item.strip():
+                    labels.append(item)
+                continue
+            if isinstance(item, dict):
+                for key in ("outcome", "label", "name", "title"):
+                    value = item.get(key)
+                    if isinstance(value, str) and value.strip():
+                        labels.append(value)
+                        break
+        return labels
+    return []
+
+
+def _is_yesno_outcomes(labels: list[str]) -> bool:
+    if len(labels) != 2:
+        return False
+    normalized = {label.strip().lower() for label in labels if isinstance(label, str)}
+    return normalized == {"yes", "no"}
 
 
 def _coerce_optional_positive_float(value: float | None) -> float | None:

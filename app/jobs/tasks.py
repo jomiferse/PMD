@@ -27,7 +27,7 @@ async def run_ingest_and_alert(db: Session) -> dict:
 
         snapshot_rows_map: dict[tuple[str, datetime], dict] = {}
         for m in markets:
-            s = score_market(m.market_id, m.title, m.category or "unknown", m.p_yes, m.liquidity)
+            s = score_market(m.market_id, m.title, m.category or "unknown", m.p_primary, m.liquidity)
 
             market_id = _truncate_str(s.market_id, 128)
             title = _truncate_str(s.title, 512)
@@ -42,6 +42,8 @@ async def run_ingest_and_alert(db: Session) -> dict:
                 "title": title,
                 "category": category,
                 "market_p_yes": s.market_p_yes,
+                "primary_outcome_label": m.primary_outcome_label,
+                "is_yesno": m.is_yesno,
                 "liquidity": s.liquidity,
                 "volume_24h": m.volume_24h,
                 "volume_1w": m.volume_1w,
@@ -58,26 +60,32 @@ async def run_ingest_and_alert(db: Session) -> dict:
                 snapshot_rows_map[key] = row
 
         snapshot_rows = list(snapshot_rows_map.values())
+        snapshot_columns = _table_columns(db, "market_snapshots")
+        conflict_cols = ["market_id", "snapshot_bucket"]
+
+        if snapshot_rows and snapshot_columns:
+            for row in snapshot_rows:
+                for key in list(row.keys()):
+                    if key not in snapshot_columns:
+                        row.pop(key, None)
+
+            if "snapshot_bucket" not in snapshot_columns:
+                conflict_cols = ["market_id", "asof_ts"]
 
         if snapshot_rows:
             stmt = pg_insert(MarketSnapshot).values(snapshot_rows)
-            stmt = stmt.on_conflict_do_update(
-                index_elements=["market_id", "snapshot_bucket"],
-                set_={
-                    "title": stmt.excluded.title,
-                    "category": stmt.excluded.category,
-                    "market_p_yes": stmt.excluded.market_p_yes,
-                    "liquidity": stmt.excluded.liquidity,
-                    "volume_24h": stmt.excluded.volume_24h,
-                    "volume_1w": stmt.excluded.volume_1w,
-                    "best_ask": stmt.excluded.best_ask,
-                    "last_trade_price": stmt.excluded.last_trade_price,
-                    "model_p_yes": stmt.excluded.model_p_yes,
-                    "edge": stmt.excluded.edge,
-                    "source_ts": stmt.excluded.source_ts,
-                    "asof_ts": stmt.excluded.asof_ts,
-                },
-            )
+            row_keys = set(snapshot_rows[0].keys())
+            update_cols = [col for col in row_keys if col not in conflict_cols]
+            update_set = {col: getattr(stmt.excluded, col) for col in update_cols}
+
+            if update_set:
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=conflict_cols,
+                    set_=update_set,
+                )
+            else:
+                stmt = stmt.on_conflict_do_nothing(index_elements=conflict_cols)
+
             db.execute(stmt)
             db.commit()
 

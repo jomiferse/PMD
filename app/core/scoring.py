@@ -27,14 +27,20 @@ def simple_fair_probability(title: str, category: str) -> float:
         base = 0.5
     return clamp01(base)
 
-def score_market(market_id: str, title: str, category: str, market_p_yes: float, liquidity: float) -> ScoredMarket:
+def score_market(
+    market_id: str,
+    title: str,
+    category: str,
+    market_p_primary: float,
+    liquidity: float,
+) -> ScoredMarket:
     model_p = simple_fair_probability(title, category)
-    edge = model_p - market_p_yes
+    edge = model_p - market_p_primary
     return ScoredMarket(
         market_id=market_id,
         title=title,
         category=category or "unknown",
-        market_p_yes=market_p_yes,
+        market_p_yes=market_p_primary,
         model_p_yes=model_p,
         liquidity=liquidity,
         edge=edge,

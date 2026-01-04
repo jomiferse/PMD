@@ -1,11 +1,14 @@
 from datetime import datetime
 from pydantic import BaseModel
 
+
 class PolymarketMarket(BaseModel):
     market_id: str
     title: str
     category: str | None = None
-    p_yes: float
+    p_primary: float
+    primary_outcome_label: str = "OUTCOME_0"
+    is_yesno: bool = False
     liquidity: float = 0.0
     volume_24h: float = 0.0
     volume_1w: float = 0.0

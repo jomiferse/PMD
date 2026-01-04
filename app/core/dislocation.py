@@ -114,6 +114,8 @@ def compute_dislocation_alerts(
                 move=delta_pct,
                 market_p_yes=new_price,
                 prev_market_p_yes=old_price,
+                primary_outcome_label=snap.get("primary_outcome_label"),
+                is_yesno=snap.get("is_yesno"),
                 old_price=old_price,
                 new_price=new_price,
                 delta_pct=delta_pct,
