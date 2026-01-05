@@ -1,14 +1,17 @@
-# PMD - Polymarket Mispricing Detector (v2.3)
+# PMD - Polymarket Mispricing Detector
 
-Read-only analytics. Not financial advice. No guarantee of outcomes. No custody. No execution.
+PMD is a read-only analytics service that detects Polymarket mispricings and delivers Telegram digests.
 
-PMD ingests Polymarket Gamma data, stores 5-minute snapshots, and emits dislocation alerts
-based on percentage price movement over a time window. It does not execute trades.
-Alerts are delivered as per-user Telegram digests with operator-managed preferences.
+## Architecture
 
-## Quick start
+- Polymarket Gamma ingestion -> 5-minute market snapshots
+- Dislocation + FAST signals -> alerts
+- Effective settings per user (code defaults -> plan -> user overrides)
+- Telegram digests + AI Copilot (manual execution only)
 
-1) Copy env file and fill required values:
+## Quick start (fresh DB)
+
+1) Copy the env file and fill required values:
 
 ```bash
 cp .env.example .env
@@ -26,17 +29,181 @@ docker compose up -d --build
 docker compose exec api alembic upgrade head
 ```
 
-4) Create an API key (prints the raw key once):
+4) Seed pricing plans (assigns all users to Basic):
+
+```bash
+docker compose exec api python -m app.scripts.seed_plans
+```
+
+5) Create an API key (prints the raw key once):
 
 ```bash
 docker compose exec api python -m app.scripts.create_api_key --name prod
 ```
 
-5) Call endpoints:
+6) Call endpoints:
 
 ```bash
 curl -H "X-API-Key: <key>" http://localhost:8000/alerts/latest
 ```
+
+## Database reset / Alembic
+
+The database is disposable. If you need a clean reset, drop the database and run:
+
+```bash
+docker compose exec api alembic upgrade head
+```
+
+## Configuration model
+
+- Infra + secrets live in `.env` (DATABASE_URL, REDIS_URL, POLYMARKET_BASE_URL, TELEGRAM_BOT_TOKEN, LLM keys).
+- User limits and pricing tiers are managed in the database (plans + overrides).
+- Effective settings resolve in this order: code defaults -> plan -> user overrides.
+
+## Plans
+
+Basic (default):
+- Copilot disabled, no draft orders
+- 60m digest window, max 3 themes, max 3 alerts
+- STRONG alerts only, higher liquidity/volume filters
+- FAST disabled
+
+Pro (recommended):
+- Copilot enabled (3/day, 1 per digest), 6h theme TTL
+- 30m digest window, max 5 themes
+- STRONG + MEDIUM alerts
+- FAST enabled (watchlist)
+
+Elite:
+- Copilot enabled (10/day, 2 per digest), 2h theme TTL
+- 15m digest window, max 10 themes
+- STRONG + MEDIUM alerts, lower liquidity/volume thresholds
+- FAST enabled (watchlist)
+
+Monetized limits: Copilot caps, digest cadence, theme/alert caps, FAST access,
+and risk sizing defaults (budget + per-trade caps). Plan caps can be overridden per user.
+
+## Environment variables
+
+Required:
+- `DATABASE_URL`
+- `REDIS_URL`
+- `POLYMARKET_BASE_URL`
+
+Optional:
+- `POLY_PAGE_LIMIT` (default 100)
+- `POLY_MAX_EVENTS` (default unset/None; failsafe only)
+- `POLY_MAX_PAGES` (default 100; failsafe only)
+- `POLY_START_OFFSET` (default 0)
+- `POLY_ORDER` (default unset)
+- `POLY_ASCENDING` (default unset)
+- `POLY_USE_SERVER_FILTERS` (default true)
+- `POLY_LIQUIDITY_MIN` (default unset/None)
+- `POLY_VOLUME_MIN` (default unset/None)
+- `POLY_USE_GLOBAL_MINIMUMS` (default true)
+- `POLY_CLOB_HOST` (default `https://clob.polymarket.com`)
+- `POLY_CHAIN_ID` (default 137)
+- `POLY_SIGNATURE_TYPE` (default 0)
+- `POLY_FUNDER_ADDRESS`
+- `POLY_CREDENTIALS_ENCRYPTION_KEY`
+- `INGEST_INTERVAL_SECONDS` (default 300)
+- `CLEANUP_ENABLED` (default true)
+- `CLEANUP_SCHEDULE_HOUR_UTC` (default 3)
+- `SNAPSHOT_RETENTION_DAYS` (default 7)
+- `ALERT_RETENTION_DAYS` (default 30)
+- `DELIVERY_RETENTION_DAYS` (default 30)
+- `FAST_SIGNALS_GLOBAL_ENABLED` (default false)
+- `TELEGRAM_BOT_TOKEN`
+- `ADMIN_API_KEY`
+- `OPENAI_API_KEY`
+- `LLM_API_BASE` (default `https://api.openai.com/v1/chat/completions`)
+- `LLM_MODEL` (default `gpt-4o-mini`)
+- `LLM_TIMEOUT_SECONDS` (default 15)
+- `LLM_MAX_RETRIES` (default 2)
+- `LLM_CACHE_TTL_SECONDS` (default 3600)
+- `DEFAULT_TENANT_ID` (default "default")
+- `RATE_LIMIT_DEFAULT_PER_MIN` (default 60)
+- `LOG_LEVEL` (default INFO)
+- `LOG_JSON` (default true)
+
+Gamma ingestion continues until Gamma returns an empty page or a short page (< `POLY_PAGE_LIMIT`).
+`POLY_MAX_EVENTS` and `POLY_MAX_PAGES` are safety guards and log warnings if hit.
+When `POLY_USE_GLOBAL_MINIMUMS` is true, `POLY_LIQUIDITY_MIN`/`POLY_VOLUME_MIN` default to code
+minimums if unset; server-side filters reduce payloads but local safeguards still apply.
+
+## Admin operations
+
+Seed plans:
+
+```bash
+docker compose exec api python -m app.scripts.seed_plans
+```
+
+Create or update a plan:
+
+```bash
+docker compose exec api python -m app.scripts.create_plan --name pro --max-copilot-per-day 3
+```
+
+Assign a plan:
+
+```bash
+docker compose exec api python -m app.scripts.assign_plan --user Alice --plan-name pro
+```
+
+Add a user:
+
+```bash
+docker compose exec api python -m app.scripts.manage_users add --name "Alice" --chat-id -12345
+```
+
+Update preferences:
+
+```bash
+docker compose exec api python -m app.scripts.manage_users set-pref --user Alice --min-liquidity 50000
+```
+
+Send a test Telegram message:
+
+```bash
+docker compose exec api python -m app.scripts.manage_users test --user Alice
+```
+
+## AI Copilot (manual execution)
+
+Copilot is read-only. It generates a draft order payload for manual execution and never
+submits orders. Copilot must be enabled on the plan and per user via `copilot_enabled`.
+Risk sizing limits live in plans or per-user overrides.
+
+## FAST vs CONFIRMED signals
+
+FAST signals are watchlist-only dislocations delivered in a separate FAST digest. They
+never trigger Copilot. CONFIRMED signals are the regular dislocation alerts used for
+theme grouping, digests, and Copilot eligibility.
+
+## Troubleshooting
+
+Why Copilot did not trigger (reason codes in `admin/users/{id}/last-digest`):
+- `USER_DISABLED`: user toggle off
+- `CAP_REACHED`: daily or per-digest cap reached
+- `COPILOT_DEDUPE_ACTIVE`: theme recently sent
+- `MUTED`: market/theme muted
+- `LABEL_MAPPING_UNKNOWN`: outcome label mapping not verified
+- `NOT_REPRICING`: alert not classified as repricing
+- `CONFIDENCE_NOT_HIGH`: confidence below HIGH
+- `NOT_FOLLOW`: suggested action not FOLLOW
+- `P_OUT_OF_BAND`: probability outside user band
+- `INSUFFICIENT_SNAPSHOTS`: not enough snapshots for evidence
+- `MISSING_PRICE_OR_LIQUIDITY`: missing price or liquidity inputs
+
+`p_outcome0` means the outcome label mapping was not verified or was unknown.
+`CAP_REACHED` means the daily or per-digest Copilot cap was exhausted and is an upgrade moment.
+
+## Safety
+
+PMD never executes trades. Copilot messages are read-only and return a manual payload only.
+No custody. No private keys. No execution.
 
 ## Endpoints
 
@@ -48,185 +215,10 @@ curl -H "X-API-Key: <key>" http://localhost:8000/alerts/latest
 - `GET /status` (auth)
 - `GET /admin/users` (admin)
 - `GET /admin/users/{id}/last-digest` (admin)
+- `GET /admin/plans` (admin)
+- `POST /admin/plans` (admin)
+- `PATCH /admin/users/{id}/plan` (admin)
+- `GET /admin/users/{id}/effective-settings` (admin)
 - `GET /admin/ai-recommendations` (admin)
 - `GET /admin/stats` (admin)
 - `POST /telegram/webhook` (no auth; Telegram callback)
-
-## Alert logic (dislocation)
-
-An alert triggers when:
-- Price moves by at least `MEDIUM_MOVE_THRESHOLD` within `WINDOW_MINUTES`
-- Liquidity is at least `MEDIUM_MIN_LIQUIDITY`
-- Volume24h is at least `MEDIUM_MIN_VOLUME_24H`
-- The same market has not alerted within `ALERT_COOLDOWN_MINUTES`
-
-Alerts store old/new price, delta percent, and the trigger timestamp.
-Per-user delivery applies preference filters at digest time and logs alert deliveries.
-
-## Environment variables
-
-Required:
-- `DATABASE_URL`
-- `REDIS_URL`
-- `POLYMARKET_BASE_URL`
-
-Optional:
-- `POLY_LIMIT` (default 100)
-- `POLY_PAGE_LIMIT` (default 100)
-- `POLY_MAX_EVENTS` (default unset/None; failsafe only)
-- `POLY_MAX_PAGES` (default 100; failsafe only)
-- `POLY_START_OFFSET` (default 0)
-- `POLY_ORDER` (default unset)
-- `POLY_ASCENDING` (default unset)
-- `POLY_USE_SERVER_FILTERS` (default true)
-- `POLY_LIQUIDITY_MIN` (default unset/None)
-- `POLY_VOLUME_MIN` (default unset/None)
-- `POLY_USE_GLOBAL_MINIMUMS` (default true)
-- `INGEST_INTERVAL_SECONDS` (default 300)
-- `CLEANUP_ENABLED` (default true)
-- `CLEANUP_SCHEDULE_HOUR_UTC` (default 3)
-- `SNAPSHOT_RETENTION_DAYS` (default 7)
-- `ALERT_RETENTION_DAYS` (default 30)
-- `DELIVERY_RETENTION_DAYS` (default 30)
-- `MIN_LIQUIDITY` (default 1000)
-- `MIN_VOLUME_24H` (default 1000)
-- `WINDOW_MINUTES` (default 60)
-- `ALERT_COOLDOWN_MINUTES` (default 30)
-- `TELEGRAM_BOT_TOKEN`
-- `ADMIN_API_KEY`
-- `OPENAI_API_KEY`
-- `LLM_API_BASE` (default `https://api.openai.com/v1/chat/completions`)
-- `LLM_MODEL` (default `gpt-4o-mini`)
-- `LLM_TIMEOUT_SECONDS` (default 15)
-- `LLM_MAX_RETRIES` (default 2)
-- `LLM_CACHE_TTL_SECONDS` (default 3600)
-- `GLOBAL_MIN_LIQUIDITY` (default 1000)
-- `GLOBAL_MIN_VOLUME_24H` (default 1000)
-- `GLOBAL_DIGEST_WINDOW` (default 60)
-- `GLOBAL_MAX_ALERTS` (default 7)
-- `PYES_ACTIONABLE_MIN` (default 0.15)
-- `PYES_ACTIONABLE_MAX` (default 0.85)
-- `MAX_ACTIONABLE_PER_DIGEST` (default 5)
-- `DIGEST_ACTIONABLE_ONLY` (default true)
-- `THEME_GROUPING_ENABLED` (default true)
-- `MAX_THEMES_PER_DIGEST` (default 5)
-- `MAX_RELATED_MARKETS_PER_THEME` (default 3)
-- `MAX_AI_RECS_PER_DAY` (default 5)
-- `MAX_AI_RECS_PER_DIGEST` (default 2)
-- `AI_RECOMMENDATION_EXPIRES_MINUTES` (default 30)
-- `FAST_SIGNALS_ENABLED` (default false)
-- `FAST_WINDOW_MINUTES` (default 15)
-- `FAST_MIN_LIQUIDITY` (default 20000)
-- `FAST_MIN_VOLUME_24H` (default 20000)
-- `FAST_MIN_ABS_MOVE` (default 0.015)
-- `FAST_MIN_PCT_MOVE` (default 0.05)
-- `FAST_PYES_MIN` (default 0.15)
-- `FAST_PYES_MAX` (default 0.85)
-- `FAST_COOLDOWN_MINUTES` (default 10)
-- `FAST_MAX_THEMES_PER_DIGEST` (default 2)
-- `FAST_MAX_MARKETS_PER_THEME` (default 2)
-- `FAST_DIGEST_MODE` (default "separate")
-- `DEFAULT_TENANT_ID` (default "default")
-- `RATE_LIMIT_DEFAULT_PER_MIN` (default 60)
-- `LOG_LEVEL` (default INFO)
-- `LOG_JSON` (default true)
-
-Gamma ingestion can apply server-side filters for liquidity/volume (with local safeguards still applied).
-When `POLY_USE_GLOBAL_MINIMUMS` is true, `POLY_LIQUIDITY_MIN`/`POLY_VOLUME_MIN` default to
-`GLOBAL_MIN_LIQUIDITY`/`GLOBAL_MIN_VOLUME_24H` if unset. Server-side filters reduce payload
-but local safeguards still apply.
-Pagination continues until Gamma returns an empty page or a short page (< `POLY_PAGE_LIMIT`).
-`POLY_MAX_EVENTS` and `POLY_MAX_PAGES` are safety guards to prevent runaway pagination and do not
-change the default behavior of ingesting all available records. When `POLY_ORDER` or
-`POLY_ASCENDING` are set, they are passed through to Gamma; otherwise, the API-defined order applies.
-
-## Migrations
-
-```bash
-docker compose exec api alembic upgrade head
-```
-
-## API key management
-
-Create a new key:
-
-```bash
-docker compose exec api python -m app.scripts.create_api_key --name prod
-```
-
-The command prints the raw key once. Store it securely and pass it in the `X-API-Key` header.
-Keys are stored hashed in the database.
-
-## Telegram alerts
-
-Set `TELEGRAM_BOT_TOKEN` in `.env` and restart the services.
-Each user has their own `telegram_chat_id` and preferences that override global defaults.
-FAST watchlist signals are optional and gated by both `FAST_SIGNALS_ENABLED` and the
-per-user `fast_signals_enabled` preference.
-
-## AI Copilot (manual execution)
-
-When `ai_copilot_enabled` is true for a user, PMD generates read-only recommendations
-for actionable alerts and sends a Telegram message with a draft order block and
-Confirm/Skip/Mute buttons. Confirming does not place any order; PMD only returns a
-formatted payload for manual execution outside PMD.
-
-Required user preference fields:
-- `ai_copilot_enabled` (bool)
-- `risk_budget_usd_per_day` (float)
-- `max_usd_per_trade` (float)
-- `max_liquidity_fraction` (float)
-
-Safety constraints:
-- PMD never submits orders.
-- No private keys or trading endpoints are used.
-- Draft sizing is deterministic and conservative.
-
-## User management
-
-Add a user:
-
-```bash
-docker compose exec api python -m app.scripts.manage_users add --name "Alice" --chat-id -12345
-```
-
-Disable a user:
-
-```bash
-docker compose exec api python -m app.scripts.manage_users disable --user Alice
-```
-
-Update preferences:
-
-```bash
-docker compose exec api python -m app.scripts.manage_users set-pref --user Alice --min-liquidity 50000
-```
-
-Enable FAST watchlist signals for a user:
-
-```bash
-docker compose exec api python -m app.scripts.manage_users set-pref --user Alice --fast-signals-enabled true
-```
-
-Send a test Telegram message:
-
-```bash
-docker compose exec api python -m app.scripts.manage_users test --user Alice
-```
-
-## Scheduler
-
-The `scheduler` service enqueues ingestion jobs every `INGEST_INTERVAL_SECONDS`.
-Cleanup runs once per day after `CLEANUP_SCHEDULE_HOUR_UTC` (UTC) when enabled, and
-deletes rows older than the configured retention windows.
-You can also trigger a manual ingest by calling `POST /jobs/ingest`.
-
-## Smoke test
-
-```bash
-./scripts/smoke_test.sh <api_key>
-```
-
-## Disclaimer
-
-Read-only analytics. Not financial advice. No guarantee of outcomes. No custody. No execution.

@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session
 
 from ..models import Alert, MarketSnapshot
-from ..settings import settings
+from . import defaults
 
 FAST_ALERT_TYPE = "FAST_DISLOCATION"
 
@@ -63,14 +63,14 @@ def compute_fast_signals(
             continue
         if old_price == new_price:
             continue
-        if old_price < settings.MIN_PRICE_THRESHOLD and new_price < settings.MIN_PRICE_THRESHOLD:
+        if old_price < defaults.MIN_PRICE_THRESHOLD and new_price < defaults.MIN_PRICE_THRESHOLD:
             continue
 
         abs_move = abs(new_price - old_price)
         if abs_move < min_abs_move:
             continue
 
-        delta_pct = abs_move / max(old_price, settings.FLOOR_PRICE)
+        delta_pct = abs_move / max(old_price, defaults.FLOOR_PRICE)
         if delta_pct < min_pct_move:
             continue
 
@@ -110,6 +110,8 @@ def compute_fast_signals(
                 prev_market_p_yes=old_price,
                 primary_outcome_label=snap.get("primary_outcome_label"),
                 is_yesno=snap.get("is_yesno"),
+                mapping_confidence=snap.get("mapping_confidence"),
+                market_kind=snap.get("market_kind"),
                 old_price=old_price,
                 new_price=new_price,
                 delta_pct=delta_pct,

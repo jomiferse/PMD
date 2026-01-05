@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import uuid
 import json
 
 import redis
@@ -16,6 +17,7 @@ from .models import (
     Alert,
     AlertDelivery,
     MarketSnapshot,
+    Plan,
     User,
     UserAlertPreference,
 )
@@ -24,6 +26,9 @@ from .settings import settings
 from .core.alerts import USER_DIGEST_LAST_PAYLOAD_KEY
 from .core.alert_classification import classify_alert_with_snapshots
 from .core.ai_copilot import handle_telegram_callback
+from .core.effective_settings import invalidate_effective_settings_cache
+from .core.user_settings import get_effective_user_settings
+from .core.plans import recommended_plan_name
 
 configure_logging()
 
@@ -185,11 +190,18 @@ def admin_users(
                 "alert_strengths": pref.alert_strengths,
                 "digest_window_minutes": pref.digest_window_minutes,
                 "max_alerts_per_digest": pref.max_alerts_per_digest,
-                "ai_copilot_enabled": pref.ai_copilot_enabled,
+                "max_themes_per_digest": pref.max_themes_per_digest,
+                "max_markets_per_theme": pref.max_markets_per_theme,
+                "p_min": pref.p_min,
+                "p_max": pref.p_max,
+                "ai_copilot_enabled": user.copilot_enabled,
                 "risk_budget_usd_per_day": pref.risk_budget_usd_per_day,
                 "max_usd_per_trade": pref.max_usd_per_trade,
                 "max_liquidity_fraction": pref.max_liquidity_fraction,
                 "fast_signals_enabled": pref.fast_signals_enabled,
+                "fast_window_minutes": pref.fast_window_minutes,
+                "fast_max_themes_per_digest": pref.fast_max_themes_per_digest,
+                "fast_max_markets_per_theme": pref.fast_max_markets_per_theme,
                 "created_at": pref.created_at.isoformat(),
             }
             if pref
@@ -212,6 +224,201 @@ def admin_user_last_digest(
         return {"user_id": user_id, "last_digest": json.loads(payload)}
     except Exception:
         return {"user_id": user_id, "last_digest": None}
+
+
+@app.get("/admin/plans")
+def admin_plans(
+    db: Session = Depends(get_db),
+    _=Depends(admin_key_auth),
+):
+    rows = db.query(Plan).order_by(Plan.id.asc()).all()
+    recommended = recommended_plan_name()
+    return [
+        {
+            "id": plan.id,
+            "name": plan.name,
+            "price_monthly": plan.price_monthly,
+            "is_active": plan.is_active,
+            "copilot_enabled": plan.copilot_enabled,
+            "max_copilot_per_day": plan.max_copilot_per_day,
+            "max_copilot_per_digest": plan.max_copilot_per_digest,
+            "copilot_theme_ttl_minutes": plan.copilot_theme_ttl_minutes,
+            "fast_signals_enabled": plan.fast_signals_enabled,
+            "digest_window_minutes": plan.digest_window_minutes,
+            "max_themes_per_digest": plan.max_themes_per_digest,
+            "max_alerts_per_digest": plan.max_alerts_per_digest,
+            "max_markets_per_theme": plan.max_markets_per_theme,
+            "min_liquidity": plan.min_liquidity,
+            "min_volume_24h": plan.min_volume_24h,
+            "min_abs_move": plan.min_abs_move,
+            "p_min": plan.p_min,
+            "p_max": plan.p_max,
+            "allowed_strengths": plan.allowed_strengths,
+            "fast_window_minutes": plan.fast_window_minutes,
+            "fast_max_themes_per_digest": plan.fast_max_themes_per_digest,
+            "fast_max_markets_per_theme": plan.fast_max_markets_per_theme,
+            "risk_budget_usd_per_day": plan.risk_budget_usd_per_day,
+            "max_usd_per_trade": plan.max_usd_per_trade,
+            "max_liquidity_fraction": plan.max_liquidity_fraction,
+            "created_at": plan.created_at.isoformat() if plan.created_at else None,
+            "recommended": plan.name == recommended,
+        }
+        for plan in rows
+    ]
+
+
+@app.post("/admin/plans")
+async def admin_upsert_plan(
+    request: Request,
+    db: Session = Depends(get_db),
+    _=Depends(admin_key_auth),
+):
+    payload = await request.json()
+    plan_id = payload.get("id")
+    name = payload.get("name")
+    if not plan_id and not name:
+        return {"ok": False, "error": "missing_name"}
+
+    plan = None
+    if plan_id is not None:
+        plan = db.query(Plan).filter(Plan.id == plan_id).one_or_none()
+    if plan is None and name:
+        plan = db.query(Plan).filter(Plan.name == name).one_or_none()
+    if plan is None:
+        if not name:
+            return {"ok": False, "error": "plan_not_found"}
+        plan = Plan(name=name)
+
+    allowed_fields = {
+        "name",
+        "price_monthly",
+        "is_active",
+        "copilot_enabled",
+        "max_copilot_per_day",
+        "max_copilot_per_digest",
+        "copilot_theme_ttl_minutes",
+        "fast_signals_enabled",
+        "digest_window_minutes",
+        "max_themes_per_digest",
+        "max_alerts_per_digest",
+        "max_markets_per_theme",
+        "min_liquidity",
+        "min_volume_24h",
+        "min_abs_move",
+        "p_min",
+        "p_max",
+        "allowed_strengths",
+        "fast_window_minutes",
+        "fast_max_themes_per_digest",
+        "fast_max_markets_per_theme",
+        "risk_budget_usd_per_day",
+        "max_usd_per_trade",
+        "max_liquidity_fraction",
+    }
+    for key, value in payload.items():
+        if key not in allowed_fields:
+            continue
+        if key == "allowed_strengths":
+            value = _normalize_strengths_input(value)
+        setattr(plan, key, value)
+
+    db.add(plan)
+    db.commit()
+    db.refresh(plan)
+    return {"ok": True, "plan_id": plan.id}
+
+
+@app.patch("/admin/users/{user_id}/plan")
+async def admin_assign_plan(
+    user_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    _=Depends(admin_key_auth),
+):
+    payload = await request.json()
+    plan_id = payload.get("plan_id")
+    plan_name = payload.get("plan_name")
+    if plan_id is None and not plan_name:
+        return {"ok": False, "error": "missing_plan"}
+
+    plan = None
+    if plan_id is not None:
+        plan = db.query(Plan).filter(Plan.id == plan_id).one_or_none()
+    if plan is None and plan_name:
+        plan = db.query(Plan).filter(Plan.name == plan_name).one_or_none()
+    if plan is None:
+        return {"ok": False, "error": "plan_not_found"}
+
+    parsed_user_id = user_id
+    if isinstance(user_id, str):
+        try:
+            parsed_user_id = uuid.UUID(user_id)
+        except ValueError:
+            return {"ok": False, "error": "invalid_user_id"}
+    user = db.query(User).filter(User.user_id == parsed_user_id).one_or_none()
+    if not user:
+        return {"ok": False, "error": "user_not_found"}
+
+    user.plan_id = plan.id
+    db.commit()
+    invalidate_effective_settings_cache(user.user_id)
+    return {"ok": True, "user_id": str(user.user_id), "plan_id": plan.id, "plan_name": plan.name}
+
+
+@app.get("/admin/users/{user_id}/effective-settings")
+def admin_user_effective_settings(
+    user_id: str,
+    db: Session = Depends(get_db),
+    _=Depends(admin_key_auth),
+):
+    parsed_user_id = user_id
+    if isinstance(user_id, str):
+        try:
+            parsed_user_id = uuid.UUID(user_id)
+        except ValueError:
+            return {"user_id": user_id, "error": "invalid_user_id"}
+    user = db.query(User).filter(User.user_id == parsed_user_id).one_or_none()
+    if not user:
+        return {"user_id": user_id, "error": "user_not_found"}
+    effective = get_effective_user_settings(user, db=db)
+    return {
+        "user_id": str(user.user_id),
+        "plan_name": effective.plan_name,
+        "copilot_enabled": effective.copilot_enabled,
+        "max_copilot_per_day": effective.max_copilot_per_day,
+        "max_copilot_per_digest": effective.max_copilot_per_digest,
+        "copilot_theme_ttl_minutes": effective.copilot_theme_ttl_minutes,
+        "fast_signals_enabled": effective.fast_signals_enabled,
+        "fast_window_minutes": effective.fast_window_minutes,
+        "fast_max_themes_per_digest": effective.fast_max_themes_per_digest,
+        "fast_max_markets_per_theme": effective.fast_max_markets_per_theme,
+        "digest_window_minutes": effective.digest_window_minutes,
+        "max_themes_per_digest": effective.max_themes_per_digest,
+        "max_markets_per_theme": effective.max_markets_per_theme,
+        "max_alerts_per_digest": effective.max_alerts_per_digest,
+        "min_liquidity": effective.min_liquidity,
+        "min_volume_24h": effective.min_volume_24h,
+        "min_abs_move": effective.min_abs_move,
+        "p_min": effective.p_min,
+        "p_max": effective.p_max,
+        "allowed_strengths": sorted(effective.allowed_strengths),
+        "risk_budget_usd_per_day": effective.risk_budget_usd_per_day,
+        "max_usd_per_trade": effective.max_usd_per_trade,
+        "max_liquidity_fraction": effective.max_liquidity_fraction,
+        "overrides_json": user.overrides_json,
+    }
+
+
+def _normalize_strengths_input(value) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple, set)):
+        parts = [str(part).strip().upper() for part in value if str(part).strip()]
+        return ",".join(parts) if parts else None
+    if isinstance(value, str):
+        parts = [part.strip().upper() for part in value.split(",") if part.strip()]
+        return ",".join(parts) if parts else None
+    return None
 
 
 @app.get("/admin/ai-recommendations")

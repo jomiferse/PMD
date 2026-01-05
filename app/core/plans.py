@@ -1,0 +1,163 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+
+DEFAULT_PLAN_NAME = "basic"
+RECOMMENDED_PLAN_NAME = "pro"
+UPGRADE_PATH = {
+    "basic": "pro",
+    "pro": "elite",
+    "elite": None,
+}
+
+
+@dataclass(frozen=True)
+class PlanSeed:
+    name: str
+    price_monthly: float | None
+    copilot_enabled: bool
+    max_copilot_per_day: int
+    max_copilot_per_digest: int
+    copilot_theme_ttl_minutes: int
+    digest_window_minutes: int
+    max_themes_per_digest: int
+    max_alerts_per_digest: int
+    max_markets_per_theme: int
+    min_liquidity: float
+    min_volume_24h: float
+    min_abs_move: float
+    p_min: float
+    p_max: float
+    allowed_strengths: str
+    fast_signals_enabled: bool
+    fast_window_minutes: int
+    fast_max_themes_per_digest: int
+    fast_max_markets_per_theme: int
+    risk_budget_usd_per_day: float
+    max_usd_per_trade: float
+    max_liquidity_fraction: float
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "price_monthly": self.price_monthly,
+            "copilot_enabled": self.copilot_enabled,
+            "max_copilot_per_day": self.max_copilot_per_day,
+            "max_copilot_per_digest": self.max_copilot_per_digest,
+            "copilot_theme_ttl_minutes": self.copilot_theme_ttl_minutes,
+            "digest_window_minutes": self.digest_window_minutes,
+            "max_themes_per_digest": self.max_themes_per_digest,
+            "max_alerts_per_digest": self.max_alerts_per_digest,
+            "max_markets_per_theme": self.max_markets_per_theme,
+            "min_liquidity": self.min_liquidity,
+            "min_volume_24h": self.min_volume_24h,
+            "min_abs_move": self.min_abs_move,
+            "p_min": self.p_min,
+            "p_max": self.p_max,
+            "allowed_strengths": self.allowed_strengths,
+            "fast_signals_enabled": self.fast_signals_enabled,
+            "fast_window_minutes": self.fast_window_minutes,
+            "fast_max_themes_per_digest": self.fast_max_themes_per_digest,
+            "fast_max_markets_per_theme": self.fast_max_markets_per_theme,
+            "risk_budget_usd_per_day": self.risk_budget_usd_per_day,
+            "max_usd_per_trade": self.max_usd_per_trade,
+            "max_liquidity_fraction": self.max_liquidity_fraction,
+        }
+
+
+PLAN_SEEDS = [
+    PlanSeed(
+        name="basic",
+        price_monthly=10.0,
+        copilot_enabled=False,
+        max_copilot_per_day=0,
+        max_copilot_per_digest=0,
+        copilot_theme_ttl_minutes=360,
+        digest_window_minutes=60,
+        max_themes_per_digest=3,
+        max_alerts_per_digest=3,
+        max_markets_per_theme=3,
+        min_liquidity=5000.0,
+        min_volume_24h=5000.0,
+        min_abs_move=0.01,
+        p_min=0.15,
+        p_max=0.85,
+        allowed_strengths="STRONG",
+        fast_signals_enabled=False,
+        fast_window_minutes=15,
+        fast_max_themes_per_digest=2,
+        fast_max_markets_per_theme=2,
+        risk_budget_usd_per_day=0.0,
+        max_usd_per_trade=0.0,
+        max_liquidity_fraction=0.01,
+    ),
+    PlanSeed(
+        name="pro",
+        price_monthly=29.0,
+        copilot_enabled=True,
+        max_copilot_per_day=3,
+        max_copilot_per_digest=1,
+        copilot_theme_ttl_minutes=360,
+        digest_window_minutes=30,
+        max_themes_per_digest=5,
+        max_alerts_per_digest=7,
+        max_markets_per_theme=3,
+        min_liquidity=3000.0,
+        min_volume_24h=3000.0,
+        min_abs_move=0.01,
+        p_min=0.15,
+        p_max=0.85,
+        allowed_strengths="STRONG,MEDIUM",
+        fast_signals_enabled=True,
+        fast_window_minutes=10,
+        fast_max_themes_per_digest=2,
+        fast_max_markets_per_theme=2,
+        risk_budget_usd_per_day=200.0,
+        max_usd_per_trade=100.0,
+        max_liquidity_fraction=0.01,
+    ),
+    PlanSeed(
+        name="elite",
+        price_monthly=99.0,
+        copilot_enabled=True,
+        max_copilot_per_day=10,
+        max_copilot_per_digest=2,
+        copilot_theme_ttl_minutes=120,
+        digest_window_minutes=15,
+        max_themes_per_digest=10,
+        max_alerts_per_digest=10,
+        max_markets_per_theme=3,
+        min_liquidity=1000.0,
+        min_volume_24h=1000.0,
+        min_abs_move=0.01,
+        p_min=0.15,
+        p_max=0.85,
+        allowed_strengths="STRONG,MEDIUM",
+        fast_signals_enabled=True,
+        fast_window_minutes=5,
+        fast_max_themes_per_digest=2,
+        fast_max_markets_per_theme=2,
+        risk_budget_usd_per_day=500.0,
+        max_usd_per_trade=250.0,
+        max_liquidity_fraction=0.01,
+    ),
+]
+
+
+def get_plan_seeds() -> list[PlanSeed]:
+    return list(PLAN_SEEDS)
+
+
+def recommended_plan_name() -> str:
+    return RECOMMENDED_PLAN_NAME
+
+
+def upgrade_target_name(current_plan: str | None) -> str | None:
+    if not current_plan:
+        return RECOMMENDED_PLAN_NAME
+    normalized = str(current_plan).strip().lower()
+    if normalized in UPGRADE_PATH:
+        return UPGRADE_PATH[normalized]
+    return RECOMMENDED_PLAN_NAME

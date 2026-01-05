@@ -1,13 +1,20 @@
-from app.trading.sizing import compute_draft_size, MIN_NOTIONAL_USD, MAX_SIZE_SHARES
+from app.trading.sizing import DraftUnavailable, compute_draft_size, MIN_NOTIONAL_USD, MAX_SIZE_SHARES
 
 
 def test_sizing_requires_risk_limits():
-    assert compute_draft_size(0.0, 10.0, 0.01, 10.0, 1000.0, 0.5) is None
-    assert compute_draft_size(10.0, 0.0, 0.01, 10.0, 1000.0, 0.5) is None
+    result = compute_draft_size(0.0, 10.0, 0.01, 10.0, 1000.0, 0.5)
+    assert isinstance(result, DraftUnavailable)
+    assert "risk_budget_usd_per_day is 0 (or missing)" in result.reasons
+
+    result = compute_draft_size(10.0, 0.0, 0.01, 10.0, 1000.0, 0.5)
+    assert isinstance(result, DraftUnavailable)
+    assert "max_usd_per_trade is 0 (or missing)" in result.reasons
 
 
 def test_sizing_rejects_bad_price():
-    assert compute_draft_size(10.0, 10.0, 0.01, 10.0, 1000.0, 0.0) is None
+    result = compute_draft_size(10.0, 10.0, 0.01, 10.0, 1000.0, 0.0)
+    assert isinstance(result, DraftUnavailable)
+    assert "missing price" in result.reasons
 
 
 def test_sizing_respects_caps_and_min_notional():
@@ -17,7 +24,7 @@ def test_sizing_respects_caps_and_min_notional():
     assert result.size_shares == 100.0
 
     too_small = compute_draft_size(100.0, 2.0, 0.01, 100.0, 10000.0, 1.0)
-    assert too_small is None
+    assert isinstance(too_small, DraftUnavailable)
 
     capped = compute_draft_size(1000000.0, 1000000.0, 1.0, 1000000.0, 1000000.0, 0.0001)
     assert capped is not None

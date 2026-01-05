@@ -3,6 +3,7 @@ import asyncio
 import httpx
 
 from app.polymarket.client import PolymarketClient
+from app.core import defaults
 from app.settings import settings
 
 
@@ -56,8 +57,8 @@ def test_server_filters_include_effective_minimums(monkeypatch):
     monkeypatch.setattr(settings, "POLY_USE_GLOBAL_MINIMUMS", True)
     monkeypatch.setattr(settings, "POLY_LIQUIDITY_MIN", None)
     monkeypatch.setattr(settings, "POLY_VOLUME_MIN", None)
-    monkeypatch.setattr(settings, "GLOBAL_MIN_LIQUIDITY", 123.0)
-    monkeypatch.setattr(settings, "GLOBAL_MIN_VOLUME_24H", 456.0)
+    monkeypatch.setattr(defaults, "GLOBAL_MIN_LIQUIDITY", 123.0)
+    monkeypatch.setattr(defaults, "GLOBAL_MIN_VOLUME_24H", 456.0)
 
     async def _run():
         client = PolymarketClient()
@@ -80,8 +81,8 @@ def test_local_filtering_applies_to_low_quality_markets(monkeypatch):
     monkeypatch.setattr(settings, "POLY_USE_GLOBAL_MINIMUMS", True)
     monkeypatch.setattr(settings, "POLY_LIQUIDITY_MIN", None)
     monkeypatch.setattr(settings, "POLY_VOLUME_MIN", None)
-    monkeypatch.setattr(settings, "GLOBAL_MIN_LIQUIDITY", 1000.0)
-    monkeypatch.setattr(settings, "GLOBAL_MIN_VOLUME_24H", 1000.0)
+    monkeypatch.setattr(defaults, "GLOBAL_MIN_LIQUIDITY", 1000.0)
+    monkeypatch.setattr(defaults, "GLOBAL_MIN_VOLUME_24H", 1000.0)
 
     async def _run():
         client = PolymarketClient()
@@ -103,8 +104,8 @@ def test_no_effective_minimums_sends_no_filters_and_keeps_markets(monkeypatch):
     monkeypatch.setattr(settings, "POLY_USE_GLOBAL_MINIMUMS", False)
     monkeypatch.setattr(settings, "POLY_LIQUIDITY_MIN", None)
     monkeypatch.setattr(settings, "POLY_VOLUME_MIN", None)
-    monkeypatch.setattr(settings, "GLOBAL_MIN_LIQUIDITY", 1000.0)
-    monkeypatch.setattr(settings, "GLOBAL_MIN_VOLUME_24H", 1000.0)
+    monkeypatch.setattr(defaults, "GLOBAL_MIN_LIQUIDITY", 1000.0)
+    monkeypatch.setattr(defaults, "GLOBAL_MIN_VOLUME_24H", 1000.0)
 
     async def _run():
         client = PolymarketClient()

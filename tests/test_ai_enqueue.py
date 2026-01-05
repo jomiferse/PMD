@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -6,12 +7,17 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app.core import defaults
 from app.core.alert_classification import AlertClassification
-from app.core.alerts import UserDigestConfig, _enqueue_ai_recommendations, _send_user_digest
+from app.core.alerts import (
+    CopilotIneligibilityReason,
+    UserDigestConfig,
+    _enqueue_ai_recommendations,
+    _send_user_digest,
+)
 from app.alerts.theme_key import extract_theme
 from app.db import Base
-from app.models import AiRecommendation, AiThemeMute, Alert
-from app.settings import settings
+from app.models import AiThemeMute, Alert
 
 
 @pytest.fixture()
@@ -85,11 +91,23 @@ def _make_config(user_id):
         max_usd_per_trade=20.0,
         max_liquidity_fraction=0.01,
         fast_signals_enabled=False,
+        fast_window_minutes=defaults.DEFAULT_FAST_WINDOW_MINUTES,
+        fast_max_themes_per_digest=defaults.DEFAULT_FAST_MAX_THEMES_PER_DIGEST,
+        fast_max_markets_per_theme=defaults.DEFAULT_FAST_MAX_MARKETS_PER_THEME,
+        p_min=defaults.DEFAULT_P_MIN,
+        p_max=defaults.DEFAULT_P_MAX,
+        plan_name="default",
+        max_copilot_per_day=5,
+        max_copilot_per_digest=1,
+        copilot_theme_ttl_minutes=360,
+        max_themes_per_digest=5,
+        max_markets_per_theme=defaults.DEFAULT_MAX_MARKETS_PER_THEME,
     )
 
 
 def _patch_digest_helpers(monkeypatch):
     monkeypatch.setattr("app.core.alerts._digest_recently_sent", lambda *args, **kwargs: False)
+    monkeypatch.setattr("app.core.alerts._claim_digest_fingerprint", lambda *args, **kwargs: True)
     monkeypatch.setattr("app.core.alerts._record_digest_sent", lambda *args, **kwargs: None)
 
 
@@ -138,35 +156,20 @@ def test_ai_enqueue_respects_daily_cap(db_session, monkeypatch):
     alert = _make_alert(market_id="market-1")
     db_session.add(alert)
     db_session.commit()
-
-    db_session.add(
-        AiRecommendation(
-            user_id=user_id,
-            alert_id=alert.id,
-            recommendation="BUY",
-            confidence="HIGH",
-            rationale="test",
-            risks="test",
-            status="PROPOSED",
-            created_at=datetime.now(timezone.utc),
-        )
+    enqueued = []
+    fake_redis = FakeRedis()
+    date_key = datetime.now(timezone.utc).date().isoformat()
+    fake_redis.store[f"copilot:count:{user_id}:{date_key}"] = "1"
+    monkeypatch.setattr("app.core.alerts.redis_conn", fake_redis)
+    monkeypatch.setattr(
+        "app.core.alerts.classify_alert_with_snapshots",
+        lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
     )
-    db_session.commit()
-
-    original_daily = settings.MAX_COPILOT_PER_DAY
-    settings.MAX_COPILOT_PER_DAY = 1
-    try:
-        enqueued = []
-        monkeypatch.setattr("app.core.alerts.redis_conn", FakeRedis())
-        monkeypatch.setattr(
-            "app.core.alerts.classify_alert_with_snapshots",
-            lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
-        )
-        monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: enqueued.append(args))
-        _enqueue_ai_recommendations(db_session, _make_config(user_id), [alert])
-        assert not enqueued
-    finally:
-        settings.MAX_COPILOT_PER_DAY = original_daily
+    monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: enqueued.append(args))
+    config = _make_config(user_id)
+    config = config.__class__(**{**config.__dict__, "max_copilot_per_day": 1})
+    _enqueue_ai_recommendations(db_session, config, [alert])
+    assert not enqueued
 
 
 def test_ai_enqueue_respects_digest_cap(db_session, monkeypatch):
@@ -178,23 +181,17 @@ def test_ai_enqueue_respects_digest_cap(db_session, monkeypatch):
     db_session.add_all(alerts)
     db_session.commit()
 
-    original_daily = settings.MAX_COPILOT_PER_DAY
-    original_digest = settings.MAX_COPILOT_THEMES_PER_DIGEST
-    settings.MAX_COPILOT_PER_DAY = 5
-    settings.MAX_COPILOT_THEMES_PER_DIGEST = 1
-    try:
-        enqueued = []
-        monkeypatch.setattr("app.core.alerts.redis_conn", FakeRedis())
-        monkeypatch.setattr(
-            "app.core.alerts.classify_alert_with_snapshots",
-            lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
-        )
-        monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: enqueued.append(args))
-        _enqueue_ai_recommendations(db_session, _make_config(user_id), alerts)
-        assert len(enqueued) == 1
-    finally:
-        settings.MAX_COPILOT_PER_DAY = original_daily
-        settings.MAX_COPILOT_THEMES_PER_DIGEST = original_digest
+    enqueued = []
+    monkeypatch.setattr("app.core.alerts.redis_conn", FakeRedis())
+    monkeypatch.setattr(
+        "app.core.alerts.classify_alert_with_snapshots",
+        lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
+    )
+    monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: enqueued.append(args))
+    config = _make_config(user_id)
+    config = config.__class__(**{**config.__dict__, "max_copilot_per_digest": 1})
+    _enqueue_ai_recommendations(db_session, config, alerts)
+    assert len(enqueued) == 1
 
 
 def test_copilot_triggers_for_actionable_theme(db_session, monkeypatch):
@@ -213,7 +210,8 @@ def test_copilot_triggers_for_actionable_theme(db_session, monkeypatch):
     db_session.commit()
 
     enqueued = []
-    monkeypatch.setattr("app.core.alerts.redis_conn", FakeRedis())
+    fake_redis = FakeRedis()
+    monkeypatch.setattr("app.core.alerts.redis_conn", fake_redis)
     monkeypatch.setattr(
         "app.core.alerts.classify_alert_with_snapshots",
         lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
@@ -222,6 +220,10 @@ def test_copilot_triggers_for_actionable_theme(db_session, monkeypatch):
 
     _enqueue_ai_recommendations(db_session, _make_config(user_id), alerts)
     assert len(enqueued) == 1
+    stored = fake_redis.store[f"copilot:last_eval:{user_id}"]
+    payload = json.loads(stored)
+    assert payload["themes_eligible_count"] == 1
+    assert payload["themes"][0]["reasons"] == []
 
 
 def test_copilot_skips_non_follow(db_session, monkeypatch):
@@ -266,6 +268,57 @@ def test_copilot_dedupe_by_theme_key(db_session, monkeypatch):
     _enqueue_ai_recommendations(db_session, _make_config(user_id), [alert])
     _enqueue_ai_recommendations(db_session, _make_config(user_id), [alert])
     assert len(enqueued) == 1
+
+
+def test_copilot_eval_includes_label_mapping_unknown(db_session, monkeypatch):
+    user_id = uuid4()
+    alert = _make_alert(
+        market_id="market-1",
+        mapping_confidence="unknown",
+        title="Will the price of Bitcoin be above $50 on Jan 5 2026?",
+    )
+    db_session.add(alert)
+    db_session.commit()
+
+    fake_redis = FakeRedis()
+    monkeypatch.setattr("app.core.alerts.redis_conn", fake_redis)
+    monkeypatch.setattr(
+        "app.core.alerts.classify_alert_with_snapshots",
+        lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "WAIT"),
+    )
+    monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: None)
+
+    _enqueue_ai_recommendations(db_session, _make_config(user_id), [alert])
+    stored = fake_redis.store[f"copilot:last_eval:{user_id}"]
+    payload = json.loads(stored)
+    reasons = payload["themes"][0]["reasons"]
+    assert CopilotIneligibilityReason.LABEL_MAPPING_UNKNOWN.value in reasons
+
+
+def test_copilot_eval_includes_dedupe_reason(db_session, monkeypatch):
+    user_id = uuid4()
+    alert = _make_alert(
+        market_id="market-1",
+        title="Will the price of Bitcoin be above $50 on Jan 5 2026?",
+    )
+    db_session.add(alert)
+    db_session.commit()
+
+    fake_redis = FakeRedis()
+    theme_key = extract_theme(alert.title, category=alert.category, slug=alert.market_id).theme_key
+    fake_redis.store[f"copilot:sent:{user_id}:{theme_key}"] = "1"
+    monkeypatch.setattr("app.core.alerts.redis_conn", fake_redis)
+    monkeypatch.setattr(
+        "app.core.alerts.classify_alert_with_snapshots",
+        lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
+    )
+    monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: None)
+
+    _enqueue_ai_recommendations(db_session, _make_config(user_id), [alert])
+    stored = fake_redis.store[f"copilot:last_eval:{user_id}"]
+    payload = json.loads(stored)
+    reasons = payload["themes"][0]["reasons"]
+    assert CopilotIneligibilityReason.COPILOT_DEDUPE_ACTIVE.value in reasons
 
 
 def test_copilot_respects_theme_mute(db_session, monkeypatch):

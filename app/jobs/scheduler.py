@@ -1,3 +1,4 @@
+import os
 import time
 import logging
 from datetime import datetime, timezone
@@ -11,6 +12,7 @@ from .run import job_sync_wrapper, cleanup_sync_wrapper
 
 logger = logging.getLogger(__name__)
 CLEANUP_LAST_DATE_KEY = "cleanup:last_date"
+SCHEDULER_HEARTBEAT_KEY = "scheduler:heartbeat"
 
 
 def _maybe_enqueue_cleanup(queue: Queue, redis_conn, now_ts: datetime) -> None:
@@ -32,9 +34,18 @@ def main() -> None:
     redis_conn = redis.from_url(settings.REDIS_URL)
     queue = Queue("default", connection=redis_conn)
     interval = max(30, settings.INGEST_INTERVAL_SECONDS)
+    scheduler_id = f"{os.getpid()}:{int(time.time())}"
 
     while True:
         try:
+            ttl_seconds = max(interval * 2, 60)
+            claimed = redis_conn.set(SCHEDULER_HEARTBEAT_KEY, scheduler_id, nx=True, ex=ttl_seconds)
+            if not claimed:
+                existing = redis_conn.get(SCHEDULER_HEARTBEAT_KEY)
+                existing_id = existing.decode() if existing else "unknown"
+                if existing_id != scheduler_id:
+                    logger.warning("scheduler_multiple_detected existing=%s current=%s", existing_id, scheduler_id)
+                redis_conn.set(SCHEDULER_HEARTBEAT_KEY, scheduler_id, ex=ttl_seconds)
             count = queue.count if isinstance(queue.count, int) else queue.count()
             if count == 0:
                 job = queue.enqueue(job_sync_wrapper)

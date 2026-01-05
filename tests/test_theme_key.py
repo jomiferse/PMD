@@ -43,3 +43,28 @@ def test_extract_theme_is_deterministic():
     first = extract_theme(title)
     second = extract_theme(title)
     assert first == second
+
+
+def test_will_question_label_is_concise():
+    title = "Will Avatar: Fire and Ash 3rd weekend be less than $40m?"
+    extracted = extract_theme(title)
+    assert "Will" not in extracted.short_title
+    assert "<" in extracted.short_title
+    assert "40" in extracted.short_title
+    assert len(extracted.short_title) <= 40
+
+
+def test_matchup_total_label():
+    title = "Seahawks vs Rams total 47.5"
+    extracted = extract_theme(title)
+    assert extracted.kind == "matchup"
+    assert "Total 47.5" in extracted.short_title
+    assert "Total 47.5" in extracted.theme_label
+
+
+def test_matchup_spread_label():
+    title = "Seahawks vs Rams spread -7.5"
+    extracted = extract_theme(title)
+    assert extracted.kind == "matchup"
+    assert "Spread -7.5" in extracted.short_title
+    assert "Spread -7.5" in extracted.theme_label

@@ -34,6 +34,16 @@ def compute_dislocation_alerts(
     now_ts = datetime.now(timezone.utc)
     cooldown_start = now_ts - timedelta(minutes=cooldown_minutes)
     seen_market_ids: set[str] = set()
+    market_ids = {snap.get("market_id") for snap in snapshots if snap.get("market_id")}
+    prev_snapshots = _load_prev_snapshots(db, market_ids, window_start)
+    cooldown_field = Alert.triggered_at if use_triggered_at else Alert.created_at
+    recent_markets = _load_recent_alert_markets(
+        db,
+        market_ids,
+        tenant_id,
+        cooldown_field,
+        cooldown_start,
+    )
 
     for snap in snapshots:
         # Skip illiquid markets to avoid noisy, low-signal moves.
@@ -45,23 +55,19 @@ def compute_dislocation_alerts(
         if snap["market_id"] in seen_market_ids:
             continue
 
-        prev = (
-            db.query(MarketSnapshot)
-            .filter(
-                MarketSnapshot.market_id == snap["market_id"],
-                MarketSnapshot.snapshot_bucket >= window_start,
-                MarketSnapshot.snapshot_bucket < snap["snapshot_bucket"],
-            )
-            .order_by(MarketSnapshot.snapshot_bucket.asc())
-            .first()
+        prev = _pick_prev_snapshot(
+            prev_snapshots,
+            snap["market_id"],
+            snap["snapshot_bucket"],
         )
         if not prev:
             continue
 
-        if prev.market_p_yes <= 0:
+        prev_bucket, prev_price = prev
+        if prev_price <= 0:
             continue
 
-        old_price = prev.market_p_yes
+        old_price = prev_price
         new_price = snap["market_p_yes"]
         # Skip unchanged prices so % math can't create phantom moves.
         if old_price == new_price:
@@ -80,19 +86,7 @@ def compute_dislocation_alerts(
         if delta_pct < medium_move_threshold:
             continue
 
-        cooldown_field = Alert.triggered_at if use_triggered_at else Alert.created_at
-        recent = (
-            db.query(Alert.id)
-            .filter(
-                Alert.tenant_id == tenant_id,
-                Alert.alert_type == ALERT_TYPE,
-                Alert.market_id == snap["market_id"],
-                cooldown_field >= cooldown_start,
-            )
-            .limit(1)
-            .one_or_none()
-        )
-        if recent:
+        if snap["market_id"] in recent_markets:
             continue
 
         strength = AlertStrength.MEDIUM
@@ -116,6 +110,8 @@ def compute_dislocation_alerts(
                 prev_market_p_yes=old_price,
                 primary_outcome_label=snap.get("primary_outcome_label"),
                 is_yesno=snap.get("is_yesno"),
+                mapping_confidence=snap.get("mapping_confidence"),
+                market_kind=snap.get("market_kind"),
                 old_price=old_price,
                 new_price=new_price,
                 delta_pct=delta_pct,
@@ -132,3 +128,73 @@ def compute_dislocation_alerts(
         seen_market_ids.add(snap["market_id"])
 
     return alerts
+
+
+def _load_prev_snapshots(
+    db: Session,
+    market_ids: set[str],
+    window_start: datetime,
+) -> dict[str, list[tuple[datetime, float]]]:
+    if not market_ids:
+        return {}
+    rows = (
+        db.query(
+            MarketSnapshot.market_id,
+            MarketSnapshot.snapshot_bucket,
+            MarketSnapshot.market_p_yes,
+        )
+        .filter(
+            MarketSnapshot.market_id.in_(market_ids),
+            MarketSnapshot.snapshot_bucket >= window_start,
+        )
+        .order_by(MarketSnapshot.market_id.asc(), MarketSnapshot.snapshot_bucket.asc())
+        .all()
+    )
+    snapshots_by_market: dict[str, list[tuple[datetime, float]]] = {}
+    for market_id, bucket, price in rows:
+        if price is None:
+            continue
+        snapshots_by_market.setdefault(market_id, []).append((bucket, price))
+    return snapshots_by_market
+
+
+def _pick_prev_snapshot(
+    snapshots_by_market: dict[str, list[tuple[datetime, float]]],
+    market_id: str,
+    current_bucket: datetime,
+) -> tuple[datetime, float] | None:
+    current_bucket = _ensure_aware_utc(current_bucket)
+    for bucket, price in snapshots_by_market.get(market_id, []):
+        bucket = _ensure_aware_utc(bucket)
+        if bucket < current_bucket:
+            return bucket, price
+    return None
+
+
+def _ensure_aware_utc(value: datetime) -> datetime:
+    if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def _load_recent_alert_markets(
+    db: Session,
+    market_ids: set[str],
+    tenant_id: str,
+    cooldown_field,
+    cooldown_start: datetime,
+) -> set[str]:
+    if not market_ids:
+        return set()
+    rows = (
+        db.query(Alert.market_id)
+        .filter(
+            Alert.tenant_id == tenant_id,
+            Alert.alert_type == ALERT_TYPE,
+            Alert.market_id.in_(market_ids),
+            cooldown_field >= cooldown_start,
+        )
+        .distinct()
+        .all()
+    )
+    return {row[0] for row in rows}

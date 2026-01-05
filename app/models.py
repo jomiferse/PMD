@@ -1,8 +1,8 @@
 import uuid
 
-from sqlalchemy import String, Float, DateTime, Integer, Boolean, ForeignKey, func, UniqueConstraint, Index, text, Text
-from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import String, Float, DateTime, Integer, Boolean, ForeignKey, func, UniqueConstraint, Index, text, Text, JSON
+from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .db import Base
 
 class MarketSnapshot(Base):
@@ -22,6 +22,8 @@ class MarketSnapshot(Base):
     market_p_yes: Mapped[float] = mapped_column(Float)  # implied prob (0-1)
     primary_outcome_label: Mapped[str | None] = mapped_column(String(64), nullable=True)
     is_yesno: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    mapping_confidence: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    market_kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
     liquidity: Mapped[float] = mapped_column(Float, default=0.0)
     volume_24h: Mapped[float] = mapped_column(Float, default=0.0)
     volume_1w: Mapped[float] = mapped_column(Float, default=0.0)
@@ -60,6 +62,8 @@ class Alert(Base):
         UniqueConstraint("alert_type", "market_id", "snapshot_bucket", name="uq_alert_market_bucket"),
         Index("ix_alerts_created_at", "created_at"),
         Index("ix_alerts_tenant_type", "tenant_id", "alert_type"),
+        Index("ix_alerts_tenant_created", "tenant_id", "created_at"),
+        Index("ix_alerts_cooldown", "tenant_id", "alert_type", "market_id", "triggered_at"),
         Index("ix_alerts_market_triggered", "market_id", "triggered_at"),
     )
 
@@ -74,6 +78,8 @@ class Alert(Base):
     prev_market_p_yes: Mapped[float] = mapped_column(Float, default=0.0)
     primary_outcome_label: Mapped[str | None] = mapped_column(String(64), nullable=True)
     is_yesno: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    mapping_confidence: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    market_kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
     old_price: Mapped[float] = mapped_column(Float, default=0.0)
     new_price: Mapped[float] = mapped_column(Float, default=0.0)
     delta_pct: Mapped[float] = mapped_column(Float, default=0.0)
@@ -87,6 +93,37 @@ class Alert(Base):
     created_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now())
 
 
+class Plan(Base):
+    __tablename__ = "plans"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    price_monthly: Mapped[float | None] = mapped_column(Float, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    copilot_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    max_copilot_per_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_copilot_per_digest: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    copilot_theme_ttl_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fast_signals_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    digest_window_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_themes_per_digest: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_alerts_per_digest: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_markets_per_theme: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    min_liquidity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    min_volume_24h: Mapped[float | None] = mapped_column(Float, nullable=True)
+    min_abs_move: Mapped[float | None] = mapped_column(Float, nullable=True)
+    p_min: Mapped[float | None] = mapped_column(Float, nullable=True)
+    p_max: Mapped[float | None] = mapped_column(Float, nullable=True)
+    allowed_strengths: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    fast_window_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fast_max_themes_per_digest: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fast_max_markets_per_theme: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    risk_budget_usd_per_day: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_usd_per_trade: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_liquidity_fraction: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), nullable=False)
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -94,7 +131,15 @@ class User(Base):
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     telegram_chat_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    plan_id: Mapped[int | None] = mapped_column(ForeignKey("plans.id"), nullable=True)
+    copilot_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    overrides_json: Mapped[dict | None] = mapped_column(
+        JSON().with_variant(JSONB, "postgresql"),
+        nullable=True,
+    )
     created_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), nullable=False)
+
+    plan = relationship("Plan")
 
 
 class UserAlertPreference(Base):
@@ -111,11 +156,17 @@ class UserAlertPreference(Base):
     alert_strengths: Mapped[str | None] = mapped_column(String(32), nullable=True)
     digest_window_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_alerts_per_digest: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    ai_copilot_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    max_themes_per_digest: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_markets_per_theme: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    p_min: Mapped[float | None] = mapped_column(Float, nullable=True)
+    p_max: Mapped[float | None] = mapped_column(Float, nullable=True)
     risk_budget_usd_per_day: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     max_usd_per_trade: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     max_liquidity_fraction: Mapped[float] = mapped_column(Float, default=0.01, nullable=False)
-    fast_signals_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    fast_signals_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    fast_window_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fast_max_themes_per_digest: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fast_max_markets_per_theme: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), nullable=False)
 
 
@@ -225,3 +276,25 @@ class AiRecommendationEvent(Base):
     action: Mapped[str] = mapped_column(String(32), nullable=False)
     details: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     created_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), nullable=False)
+
+
+class UserPolymarketCredential(Base):
+    __tablename__ = "user_polymarket_credentials"
+    __table_args__ = (
+        UniqueConstraint("user_id", name="uq_user_polymarket_credentials_user"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    encrypted_payload: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), nullable=False)
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime,
+        default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )

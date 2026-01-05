@@ -216,8 +216,7 @@ def extract_theme(title: str, *, category: str | None = None, slug: str | None =
         team_b_key = team_b.replace(" ", "-")
         ordered = "_".join(sorted([team_a_key, team_b_key]))
         theme_key = f"{ordered}|{date_key}|matchup"
-        label = _build_matchup_label(team_a, team_b, date_key)
-        short_title = f"{team_a.title()} vs {team_b.title()}"
+        label, short_title = _build_matchup_labels(title, team_a, team_b, date_key)
         return ThemeExtract(
             theme_key=theme_key,
             theme_label=label,
@@ -234,6 +233,10 @@ def extract_theme(title: str, *, category: str | None = None, slug: str | None =
         fingerprint_key = hashlib.sha1(fingerprint_key.encode("utf-8")).hexdigest()[:16]
     theme_key = f"generic|{fingerprint_key}"
     label = _build_generic_label(normalized)
+    if normalized.startswith("will "):
+        will_label = _build_will_label(title)
+        if will_label:
+            label = will_label
     return ThemeExtract(
         theme_key=theme_key,
         theme_label=label,
@@ -327,10 +330,25 @@ def _extract_matchup(tokens: list[str], normalized: str) -> tuple[str, str] | No
 
 
 def _compact_team_token(tokens: list[str]) -> str:
-    filtered = [token for token in tokens if token not in _LEAGUE_TOKENS]
-    tail = filtered[-3:] if filtered else tokens[-3:]
-    tail = [token for token in tail if token]
+    filtered = [token for token in tokens if _token_is_team_word(token)]
+    if not filtered:
+        return ""
+    tail = filtered[-3:]
     return " ".join(tail).strip()
+
+
+def _token_is_team_word(token: str) -> bool:
+    if not token:
+        return False
+    if token in _LEAGUE_TOKENS:
+        return False
+    if token.isdigit():
+        return False
+    if token in {"u", "o", "ou", "total", "spread", "line", "over", "under"}:
+        return False
+    if any(ch.isdigit() for ch in token):
+        return False
+    return True
 
 
 def _matchup_date(title: str, category: str | None, slug: str | None) -> str:
@@ -378,6 +396,103 @@ def _build_generic_label(normalized: str) -> str:
     if not label_tokens:
         return "Market theme"
     return " ".join(label_tokens).title()
+
+
+def _build_matchup_labels(
+    title: str,
+    team_a: str,
+    team_b: str,
+    date_key: str,
+) -> tuple[str, str]:
+    base = f"{team_a.title()} vs {team_b.title()}"
+    detail = _extract_matchup_detail(title)
+    if detail:
+        label = f"{base} - {detail}"
+        date_label = _format_date_label(date_key)
+        if date_label:
+            label = f"{label} ({date_label})"
+        return label, f"{base} - {detail}"
+    return _build_matchup_label(team_a, team_b, date_key), base
+
+
+def _extract_matchup_detail(title: str) -> str | None:
+    total_match = re.search(r"\btotal\s+(\d+(?:\.\d+)?)\b", title, flags=re.IGNORECASE)
+    if total_match:
+        return f"Total {total_match.group(1)}"
+    ou_match = re.search(
+        r"\b(?:over under|over/under|o/u|ou|o u)\s+(\d+(?:\.\d+)?)\b",
+        title,
+        flags=re.IGNORECASE,
+    )
+    if ou_match:
+        return f"Total {ou_match.group(1)}"
+    short_ou_match = re.search(r"\b[ou]\s+(\d+(?:\.\d+)?)\b", title, flags=re.IGNORECASE)
+    if short_ou_match:
+        return f"Total {short_ou_match.group(1)}"
+    spread_match = re.search(
+        r"\b(?:spread|line)\s*([+-]?\d+(?:\.\d+)?)\b",
+        title,
+        flags=re.IGNORECASE,
+    )
+    if spread_match:
+        return f"Spread {spread_match.group(1)}"
+    return None
+
+
+def _build_will_label(title: str) -> str | None:
+    cleaned = re.sub(r"^\s*will\s+", "", title, flags=re.IGNORECASE).strip()
+    cleaned = cleaned.rstrip(" ?")
+    if not cleaned:
+        return None
+    normalized = normalize_text(cleaned)
+    comparator_map = {
+        "less than": "<",
+        "under": "<",
+        "below": "<",
+        "over": ">",
+        "above": ">",
+        "more than": ">",
+        "greater than": ">",
+        "at least": ">=",
+        "at most": "<=",
+    }
+    comparator = None
+    amount = None
+    matched_phrase = None
+    for phrase, symbol in comparator_map.items():
+        match = re.search(rf"\b{re.escape(phrase)}\s+\$?(\d+(?:\.\d+)?)([kmb])?\b", normalized)
+        if match:
+            comparator = symbol
+            amount = match.group(1)
+            suffix = match.group(2) or ""
+            matched_phrase = phrase
+            break
+    label = cleaned
+    if comparator and amount:
+        prefix = cleaned
+        if matched_phrase and matched_phrase in normalized:
+            prefix = re.sub(
+                rf"\b{re.escape(matched_phrase)}\s+\$?\d+(?:\.\d+)?[kmb]?\b",
+                "",
+                cleaned,
+                flags=re.IGNORECASE,
+            )
+        prefix = prefix.strip(" ,;-")
+        prefix = re.sub(r"\b(be|reach|gross|earn|hit)\b\s*$", "", prefix, flags=re.IGNORECASE).strip()
+        value = f"${amount}{suffix}" if "$" in cleaned or "usd" in normalized or "dollar" in normalized else f"{amount}{suffix}"
+        label = f"{prefix} {comparator} {value}".strip()
+    return _truncate_label(_title_case_label(label), 40)
+
+
+def _title_case_label(text: str) -> str:
+    tokens = text.split()
+    return " ".join(token if token.isupper() else token.capitalize() for token in tokens)
+
+
+def _truncate_label(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
 
 
 def _format_date_label(date_key: str) -> str | None:

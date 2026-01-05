@@ -4,7 +4,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from ..models import Alert, MarketSnapshot
-from ..settings import settings
+from . import defaults
 
 
 @dataclass(frozen=True)
@@ -27,16 +27,16 @@ def classify_alert(
 ) -> AlertClassification:
     behavior = _analyze_price_behavior(alert, price_points or [])
     abs_move = _alert_abs_move(alert)
-    large_move = abs_move >= settings.STRONG_ABS_MOVE_THRESHOLD
-    moderate_move = abs_move >= settings.MEDIUM_ABS_MOVE_THRESHOLD
+    large_move = abs_move >= defaults.STRONG_ABS_MOVE_THRESHOLD
+    moderate_move = abs_move >= defaults.MEDIUM_ABS_MOVE_THRESHOLD
 
-    high_liquidity = alert.liquidity >= settings.STRONG_MIN_LIQUIDITY
-    high_volume = alert.volume_24h >= settings.STRONG_MIN_VOLUME_24H
-    moderate_liquidity = alert.liquidity >= settings.GLOBAL_MIN_LIQUIDITY
-    moderate_volume = alert.volume_24h >= settings.GLOBAL_MIN_VOLUME_24H
+    high_liquidity = alert.liquidity >= defaults.STRONG_MIN_LIQUIDITY
+    high_volume = alert.volume_24h >= defaults.STRONG_MIN_VOLUME_24H
+    moderate_liquidity = alert.liquidity >= defaults.GLOBAL_MIN_LIQUIDITY
+    moderate_volume = alert.volume_24h >= defaults.GLOBAL_MIN_VOLUME_24H
     base_price = max(alert.old_price or 0.0, alert.new_price or 0.0)
     low_base_price = base_price > 0 and (
-        base_price < settings.MIN_PRICE_THRESHOLD or base_price < settings.FLOOR_PRICE
+        base_price < defaults.MIN_PRICE_THRESHOLD or base_price < defaults.FLOOR_PRICE
     )
 
     if low_base_price:
@@ -131,14 +131,14 @@ def _analyze_price_behavior(
 
     reversal = any(_delta_matches(delta, -direction) for delta in deltas)
     snapback = any(
-        abs(price - (alert.old_price or 0.0)) < settings.MEDIUM_ABS_MOVE_THRESHOLD
+        abs(price - (alert.old_price or 0.0)) < defaults.MEDIUM_ABS_MOVE_THRESHOLD
         for _, price in post[1:]
     )
     reversal = reversal or snapback
-    flatline = bool(deltas) and all(abs(delta) < settings.MEDIUM_ABS_MOVE_THRESHOLD for delta in deltas)
+    flatline = bool(deltas) and all(abs(delta) < defaults.MEDIUM_ABS_MOVE_THRESHOLD for delta in deltas)
 
     return AlertBehavior(sustained=sustained, reversal=reversal, flatline=flatline)
 
 
 def _delta_matches(delta: float, direction: int) -> bool:
-    return delta * direction > 0 and abs(delta) >= settings.MEDIUM_ABS_MOVE_THRESHOLD
+    return delta * direction > 0 and abs(delta) >= defaults.MEDIUM_ABS_MOVE_THRESHOLD

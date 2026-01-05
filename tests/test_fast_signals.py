@@ -8,6 +8,7 @@ from sqlalchemy.orm import sessionmaker
 from app.core.alerts import UserDigestConfig, _format_fast_digest_message, _prepare_fast_digest
 from app.core.fast_signals import compute_fast_signals
 from app.models import Alert, MarketSnapshot
+from app.core import defaults
 from app.settings import settings
 
 
@@ -61,6 +62,17 @@ def _make_pref(enabled: bool) -> UserDigestConfig:
         max_usd_per_trade=0.0,
         max_liquidity_fraction=0.01,
         fast_signals_enabled=enabled,
+        fast_window_minutes=defaults.DEFAULT_FAST_WINDOW_MINUTES,
+        fast_max_themes_per_digest=defaults.DEFAULT_FAST_MAX_THEMES_PER_DIGEST,
+        fast_max_markets_per_theme=defaults.DEFAULT_FAST_MAX_MARKETS_PER_THEME,
+        p_min=defaults.DEFAULT_P_MIN,
+        p_max=defaults.DEFAULT_P_MAX,
+        plan_name="default",
+        max_copilot_per_day=0,
+        max_copilot_per_digest=1,
+        copilot_theme_ttl_minutes=360,
+        max_themes_per_digest=5,
+        max_markets_per_theme=defaults.DEFAULT_MAX_MARKETS_PER_THEME,
     )
 
 
@@ -222,15 +234,20 @@ def test_fast_formatting_is_watch_only():
         created_at=now_ts,
     )
 
-    text = _format_fast_digest_message([alert], window_minutes=15)
+    text = _format_fast_digest_message(
+        [alert],
+        window_minutes=15,
+        max_themes_per_digest=defaults.DEFAULT_FAST_MAX_THEMES_PER_DIGEST,
+        max_markets_per_theme=defaults.DEFAULT_FAST_MAX_MARKETS_PER_THEME,
+    )
     assert "WATCH" in text
     assert "FOLLOW" not in text
     assert "STRONG" not in text
 
 
 def test_fast_not_prepared_when_user_pref_disabled(db_session):
-    original_enabled = settings.FAST_SIGNALS_ENABLED
-    settings.FAST_SIGNALS_ENABLED = True
+    original_enabled = settings.FAST_SIGNALS_GLOBAL_ENABLED
+    settings.FAST_SIGNALS_GLOBAL_ENABLED = True
     try:
         payload, reason = _prepare_fast_digest(
             db_session,
@@ -240,15 +257,15 @@ def test_fast_not_prepared_when_user_pref_disabled(db_session):
             include_footer=True,
         )
     finally:
-        settings.FAST_SIGNALS_ENABLED = original_enabled
+        settings.FAST_SIGNALS_GLOBAL_ENABLED = original_enabled
 
     assert payload is None
     assert reason == "fast_disabled"
 
 
 def test_fast_throttle_blocks_digest(db_session, monkeypatch):
-    original_enabled = settings.FAST_SIGNALS_ENABLED
-    settings.FAST_SIGNALS_ENABLED = True
+    original_enabled = settings.FAST_SIGNALS_GLOBAL_ENABLED
+    settings.FAST_SIGNALS_GLOBAL_ENABLED = True
     try:
         monkeypatch.setattr("app.core.alerts._fast_digest_recently_sent", lambda *args, **kwargs: True)
         payload, reason = _prepare_fast_digest(
@@ -259,7 +276,7 @@ def test_fast_throttle_blocks_digest(db_session, monkeypatch):
             include_footer=True,
         )
     finally:
-        settings.FAST_SIGNALS_ENABLED = original_enabled
+        settings.FAST_SIGNALS_GLOBAL_ENABLED = original_enabled
 
     assert payload is None
     assert reason == "recent_fast_digest"
@@ -333,15 +350,12 @@ def test_fast_theme_caps_apply():
         ),
     ]
 
-    original_themes = settings.FAST_MAX_THEMES_PER_DIGEST
-    original_markets = settings.FAST_MAX_MARKETS_PER_THEME
-    settings.FAST_MAX_THEMES_PER_DIGEST = 1
-    settings.FAST_MAX_MARKETS_PER_THEME = 1
-    try:
-        text = _format_fast_digest_message(alerts, window_minutes=15)
-    finally:
-        settings.FAST_MAX_THEMES_PER_DIGEST = original_themes
-        settings.FAST_MAX_MARKETS_PER_THEME = original_markets
+    text = _format_fast_digest_message(
+        alerts,
+        window_minutes=15,
+        max_themes_per_digest=1,
+        max_markets_per_theme=1,
+    )
 
     assert "PMD - FAST: 1 watchlist theme" in text
     assert text.count("\n- ") == 1

@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 from datetime import datetime, timezone, timedelta
 
 import redis
@@ -8,6 +9,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from ..polymarket.client import PolymarketClient
+from ..core import defaults
 from ..core.scoring import score_market
 from ..core.dislocation import compute_dislocation_alerts
 from ..core.fast_signals import compute_fast_signals
@@ -17,10 +19,22 @@ from ..models import MarketSnapshot, Alert
 
 logger = logging.getLogger(__name__)
 redis_conn = redis.from_url(settings.REDIS_URL)
+INGEST_LOCK_KEY = "lock:ingest"
 
 async def run_ingest_and_alert(db: Session) -> dict:
     started_at = datetime.now(timezone.utc)
     result: dict = {"ok": False, "snapshots": 0, "alerts": 0}
+    lock_value = f"{os.getpid()}:{started_at.isoformat()}"
+    lock_ttl = max(settings.INGEST_INTERVAL_SECONDS * 2, 30)
+    try:
+        locked = redis_conn.set(INGEST_LOCK_KEY, lock_value, nx=True, ex=lock_ttl)
+    except Exception:
+        logger.exception("ingest_lock_failed")
+        locked = True
+    if not locked:
+        logger.info("ingest_skipped reason=lock_held")
+        result["reason"] = "ingest_locked"
+        return result
 
     try:
         client = PolymarketClient()
@@ -45,6 +59,8 @@ async def run_ingest_and_alert(db: Session) -> dict:
                 "market_p_yes": s.market_p_yes,
                 "primary_outcome_label": m.primary_outcome_label,
                 "is_yesno": m.is_yesno,
+                "mapping_confidence": m.mapping_confidence,
+                "market_kind": m.market_kind,
                 "liquidity": s.liquidity,
                 "volume_24h": m.volume_24h,
                 "volume_1w": m.volume_1w,
@@ -95,17 +111,17 @@ async def run_ingest_and_alert(db: Session) -> dict:
         alerts = compute_dislocation_alerts(
             db=db,
             snapshots=snapshot_rows,
-            window_minutes=settings.WINDOW_MINUTES,
-            medium_move_threshold=settings.MEDIUM_MOVE_THRESHOLD,
-            min_price_threshold=settings.MIN_PRICE_THRESHOLD,
-            medium_abs_move_threshold=settings.MEDIUM_ABS_MOVE_THRESHOLD,
-            floor_price=settings.FLOOR_PRICE,
-            medium_min_liquidity=settings.MEDIUM_MIN_LIQUIDITY,
-            medium_min_volume_24h=settings.MEDIUM_MIN_VOLUME_24H,
-            strong_abs_move_threshold=settings.STRONG_ABS_MOVE_THRESHOLD,
-            strong_min_liquidity=settings.STRONG_MIN_LIQUIDITY,
-            strong_min_volume_24h=settings.STRONG_MIN_VOLUME_24H,
-            cooldown_minutes=settings.ALERT_COOLDOWN_MINUTES,
+            window_minutes=defaults.WINDOW_MINUTES,
+            medium_move_threshold=defaults.MEDIUM_MOVE_THRESHOLD,
+            min_price_threshold=defaults.MIN_PRICE_THRESHOLD,
+            medium_abs_move_threshold=defaults.MEDIUM_ABS_MOVE_THRESHOLD,
+            floor_price=defaults.FLOOR_PRICE,
+            medium_min_liquidity=defaults.MEDIUM_MIN_LIQUIDITY,
+            medium_min_volume_24h=defaults.MEDIUM_MIN_VOLUME_24H,
+            strong_abs_move_threshold=defaults.STRONG_ABS_MOVE_THRESHOLD,
+            strong_min_liquidity=defaults.STRONG_MIN_LIQUIDITY,
+            strong_min_volume_24h=defaults.STRONG_MIN_VOLUME_24H,
+            cooldown_minutes=defaults.ALERT_COOLDOWN_MINUTES,
             tenant_id=settings.DEFAULT_TENANT_ID,
             use_triggered_at=use_triggered_at,
         )
@@ -130,18 +146,18 @@ async def run_ingest_and_alert(db: Session) -> dict:
             db.commit()
 
         fast_alerts: list[Alert] = []
-        if settings.FAST_SIGNALS_ENABLED:
+        if settings.FAST_SIGNALS_GLOBAL_ENABLED:
             fast_alerts = compute_fast_signals(
                 db=db,
                 snapshots=snapshot_rows,
-                window_minutes=settings.FAST_WINDOW_MINUTES,
-                min_liquidity=settings.FAST_MIN_LIQUIDITY,
-                min_volume_24h=settings.FAST_MIN_VOLUME_24H,
-                min_abs_move=settings.FAST_MIN_ABS_MOVE,
-                min_pct_move=settings.FAST_MIN_PCT_MOVE,
-                p_yes_min=settings.FAST_PYES_MIN,
-                p_yes_max=settings.FAST_PYES_MAX,
-                cooldown_minutes=settings.FAST_COOLDOWN_MINUTES,
+                window_minutes=defaults.DEFAULT_FAST_WINDOW_MINUTES,
+                min_liquidity=defaults.FAST_MIN_LIQUIDITY,
+                min_volume_24h=defaults.FAST_MIN_VOLUME_24H,
+                min_abs_move=defaults.FAST_MIN_ABS_MOVE,
+                min_pct_move=defaults.FAST_MIN_PCT_MOVE,
+                p_yes_min=defaults.FAST_PYES_MIN,
+                p_yes_max=defaults.FAST_PYES_MAX,
+                cooldown_minutes=defaults.FAST_COOLDOWN_MINUTES,
                 tenant_id=settings.DEFAULT_TENANT_ID,
                 use_triggered_at=use_triggered_at,
             )
@@ -179,6 +195,12 @@ async def run_ingest_and_alert(db: Session) -> dict:
         raise
     finally:
         result["ts"] = datetime.now(timezone.utc).isoformat()
+        try:
+            current = redis_conn.get(INGEST_LOCK_KEY)
+            if current and current.decode() == lock_value:
+                redis_conn.delete(INGEST_LOCK_KEY)
+        except Exception:
+            logger.exception("ingest_lock_release_failed")
         try:
             redis_conn.set("ingest:last_ts", result["ts"])
             redis_conn.set("ingest:last_result", json.dumps(result, ensure_ascii=True))
@@ -293,4 +315,6 @@ OPTIONAL_ALERT_COLUMNS = {
     "delta_pct",
     "triggered_at",
     "strength",
+    "mapping_confidence",
+    "market_kind",
 }

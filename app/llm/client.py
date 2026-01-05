@@ -80,12 +80,14 @@ def _build_openai_payload(context: dict[str, Any]) -> dict[str, Any]:
     system_prompt = (
         "You are a conservative trade assistant. Provide read-only decision support only. "
         "No financial advice. If information is insufficient or ambiguous, return WAIT. "
+        "Use the provided Evidence lines and avoid generic filler. "
         "Respond with strict JSON only."
     )
     user_prompt = (
         "Given the alert context, provide a recommendation.\n"
         "Return JSON with keys: recommendation (BUY/WAIT/SKIP), confidence (HIGH/MEDIUM/LOW), "
-        "rationale (short sentence), risks (short sentence)."
+        "rationale (max 2 short bullets separated by '; '), risks (max 2 short bullets separated by '; '). "
+        "Bullets must reference the Evidence; avoid generic language."
     )
     return {
         "model": settings.LLM_MODEL,

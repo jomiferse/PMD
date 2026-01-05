@@ -5,6 +5,7 @@ import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
 from .schemas import PolymarketMarket
 from ..settings import settings
+from ..core import defaults
 
 logger = logging.getLogger(__name__)
 
@@ -72,10 +73,12 @@ class PolymarketClient:
         fetched_events = 0
         page_count = 0
         parsed_markets = 0
+        max_events_reached = False
 
         async with httpx.AsyncClient(timeout=15) as client:
             while True:
                 if max_events is not None and fetched_events >= max_events:
+                    max_events_reached = True
                     break
                 if max_pages is not None and page_count >= max_pages:
                     logger.warning(
@@ -111,12 +114,20 @@ class PolymarketClient:
                 markets.extend(page_markets)
 
                 if max_events is not None and fetched_events >= max_events:
+                    max_events_reached = True
                     break
 
                 if len(events) < page_limit:
                     break
 
                 offset += page_limit
+
+        if max_events_reached:
+            logger.warning(
+                "polymarket_pagination_max_events_reached max_events=%s fetched_events=%s",
+                max_events,
+                fetched_events,
+            )
 
         _log_ingestion_summary(
             events_fetched=fetched_events,
@@ -212,22 +223,22 @@ def _parse_markets(
             except json.JSONDecodeError:
                 continue
 
-            if not prices:
+            if not isinstance(prices, list) or not prices:
                 continue
 
-            try:
-                p_primary = float(prices[0])
-            except (TypeError, ValueError, IndexError):
+            outcome_prices = [_parse_float(price) for price in prices]
+            if not outcome_prices:
                 continue
 
-            outcome_labels = _parse_outcome_labels(
-                m.get("outcomes")
-                or m.get("outcomeNames")
-                or m.get("outcomeTokenNames")
-                or m.get("outcomeTokens")
+            p_primary = outcome_prices[0]
+
+            outcome_labels, label_fields = _extract_outcome_labels(m)
+            mapping_confidence = _mapping_confidence(outcome_labels, outcome_prices)
+            market_kind = _market_kind_from_labels(outcome_labels)
+            primary_outcome_label = (
+                outcome_labels[0].strip() if mapping_confidence == "verified" and outcome_labels else "OUTCOME_0"
             )
-            primary_outcome_label = (outcome_labels[0].strip() if outcome_labels else "") or "OUTCOME_0"
-            is_yesno = _is_yesno_outcomes(outcome_labels)
+            is_yesno = market_kind == "yesno"
 
             # Liquidity: prefer numeric fields if present
             liq = m.get("liquidityNum")
@@ -259,13 +270,28 @@ def _parse_markets(
             if volume_min is not None and volume_24h < volume_min:
                 continue
 
+            if mapping_confidence != "verified":
+                logger.warning(
+                    "polymarket_outcome_label_mapping_unknown market_id=%s slug=%s title=%s "
+                    "label_fields=%s prices_len=%s labels_len=%s",
+                    market_id,
+                    m.get("slug") or "",
+                    title,
+                    label_fields,
+                    len(outcome_prices),
+                    len(outcome_labels),
+                )
+
             markets.append(
                 PolymarketMarket(
                     market_id=market_id,
                     title=title,
                     category=event_title or str(event_slug),
                     p_primary=p_primary,
+                    outcome_prices=outcome_prices,
                     primary_outcome_label=primary_outcome_label,
+                    mapping_confidence=mapping_confidence,
+                    market_kind=market_kind,
                     is_yesno=is_yesno,
                     liquidity=liquidity,
                     volume_24h=volume_24h,
@@ -304,11 +330,71 @@ def _parse_outcome_labels(raw) -> list[str]:
     return []
 
 
+def _extract_outcome_labels(market: dict) -> tuple[list[str], dict[str, str | list[str]]]:
+    candidates = [
+        "outcomeLabels",
+        "outcomeNames",
+        "outcomes",
+        "outcomeTokenNames",
+        "outcomeTokens",
+        "tokens",
+    ]
+    label_fields: dict[str, str | list[str]] = {}
+    picked: list[str] = []
+    for key in candidates:
+        if key not in market:
+            continue
+        raw = market.get(key)
+        parsed = _parse_outcome_labels(raw)
+        if parsed:
+            label_fields[key] = parsed
+            if not picked:
+                picked = parsed
+        else:
+            label_fields[key] = _summarize_label_field(raw)
+    return picked, label_fields
+
+
+def _summarize_label_field(raw) -> str:
+    if raw is None:
+        return "none"
+    if isinstance(raw, str):
+        value = raw.strip()
+        return value[:200] if value else "empty_string"
+    if isinstance(raw, list):
+        return f"list(len={len(raw)})"
+    if isinstance(raw, dict):
+        keys = ",".join(list(raw.keys())[:5])
+        return f"dict(keys={keys})"
+    return f"type={type(raw).__name__}"
+
+
+def _mapping_confidence(labels: list[str], prices: list[float]) -> str:
+    if labels and len(labels) == len(prices):
+        return "verified"
+    return "unknown"
+
+
 def _is_yesno_outcomes(labels: list[str]) -> bool:
     if len(labels) != 2:
         return False
     normalized = {label.strip().lower() for label in labels if isinstance(label, str)}
     return normalized == {"yes", "no"}
+
+
+def _is_ou_outcomes(labels: list[str]) -> bool:
+    if len(labels) != 2:
+        return False
+    normalized = {label.strip().lower() for label in labels if isinstance(label, str)}
+    return normalized == {"over", "under"}
+
+
+def _market_kind_from_labels(labels: list[str]) -> str:
+    if _is_yesno_outcomes(labels):
+        return "yesno"
+    if _is_ou_outcomes(labels):
+        return "ou"
+    return "multi"
 
 
 def _coerce_optional_positive_float(value: float | None) -> float | None:
@@ -328,12 +414,12 @@ def _effective_market_minimums() -> tuple[float | None, float | None]:
         liquidity_min = (
             settings.POLY_LIQUIDITY_MIN
             if settings.POLY_LIQUIDITY_MIN is not None
-            else settings.GLOBAL_MIN_LIQUIDITY
+            else defaults.GLOBAL_MIN_LIQUIDITY
         )
         volume_min = (
             settings.POLY_VOLUME_MIN
             if settings.POLY_VOLUME_MIN is not None
-            else settings.GLOBAL_MIN_VOLUME_24H
+            else defaults.GLOBAL_MIN_VOLUME_24H
         )
     else:
         liquidity_min = settings.POLY_LIQUIDITY_MIN

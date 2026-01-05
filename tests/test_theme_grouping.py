@@ -146,3 +146,33 @@ def test_grouping_is_deterministic_for_same_input_order():
     second = [theme.key for theme in group_alerts_into_themes(alerts)]
 
     assert first == second
+
+
+def test_theme_caps_apply_per_user():
+    alerts = [
+        _make_alert(
+            market_id="btc-above-90k",
+            title="Will the price of Bitcoin be above $90,000 on January 3?",
+        ),
+        _make_alert(
+            market_id="btc-88-90",
+            title="Will the price of Bitcoin be between $88,000 and $90,000 on January 3?",
+        ),
+        _make_alert(
+            market_id="lakers-bulls",
+            title="Lakers vs Bulls on January 3?",
+        ),
+    ]
+
+    text = _format_digest_message(
+        alerts=alerts,
+        window_minutes=60,
+        total_actionable=3,
+        user_name="Alice",
+        max_themes_per_digest=1,
+        max_markets_per_theme=1,
+    )
+
+    assert "PMD - 1 theme (60m)" in text
+    assert "#1 THEME" in text
+    assert "#2 THEME" not in text

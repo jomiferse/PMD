@@ -4,6 +4,7 @@ import logging
 import httpx
 
 from app.polymarket.client import PolymarketClient
+from app.core import defaults
 from app.settings import settings
 
 
@@ -52,8 +53,8 @@ def test_paginated_offsets_and_flattening(monkeypatch):
     }
     calls = []
     monkeypatch.setattr(httpx, "AsyncClient", _mock_async_client(responses, calls))
-    monkeypatch.setattr(settings, "GLOBAL_MIN_LIQUIDITY", 0.0)
-    monkeypatch.setattr(settings, "GLOBAL_MIN_VOLUME_24H", 0.0)
+    monkeypatch.setattr(defaults, "GLOBAL_MIN_LIQUIDITY", 0.0)
+    monkeypatch.setattr(defaults, "GLOBAL_MIN_VOLUME_24H", 0.0)
 
     async def _run():
         client = PolymarketClient()
@@ -74,8 +75,8 @@ def test_paginated_stops_on_short_page(monkeypatch):
     }
     calls = []
     monkeypatch.setattr(httpx, "AsyncClient", _mock_async_client(responses, calls))
-    monkeypatch.setattr(settings, "GLOBAL_MIN_LIQUIDITY", 0.0)
-    monkeypatch.setattr(settings, "GLOBAL_MIN_VOLUME_24H", 0.0)
+    monkeypatch.setattr(defaults, "GLOBAL_MIN_LIQUIDITY", 0.0)
+    monkeypatch.setattr(defaults, "GLOBAL_MIN_VOLUME_24H", 0.0)
 
     async def _run():
         client = PolymarketClient()
@@ -96,8 +97,8 @@ def test_paginated_respects_max_events(monkeypatch):
     }
     calls = []
     monkeypatch.setattr(httpx, "AsyncClient", _mock_async_client(responses, calls))
-    monkeypatch.setattr(settings, "GLOBAL_MIN_LIQUIDITY", 0.0)
-    monkeypatch.setattr(settings, "GLOBAL_MIN_VOLUME_24H", 0.0)
+    monkeypatch.setattr(defaults, "GLOBAL_MIN_LIQUIDITY", 0.0)
+    monkeypatch.setattr(defaults, "GLOBAL_MIN_VOLUME_24H", 0.0)
 
     async def _run():
         client = PolymarketClient()
@@ -119,8 +120,8 @@ def test_paginated_stops_on_max_pages_with_warning(monkeypatch, caplog):
     }
     calls = []
     monkeypatch.setattr(httpx, "AsyncClient", _mock_async_client(responses, calls))
-    monkeypatch.setattr(settings, "GLOBAL_MIN_LIQUIDITY", 0.0)
-    monkeypatch.setattr(settings, "GLOBAL_MIN_VOLUME_24H", 0.0)
+    monkeypatch.setattr(defaults, "GLOBAL_MIN_LIQUIDITY", 0.0)
+    monkeypatch.setattr(defaults, "GLOBAL_MIN_VOLUME_24H", 0.0)
     monkeypatch.setattr(settings, "POLY_MAX_PAGES", 2)
 
     async def _run():
@@ -145,8 +146,8 @@ def test_paginated_ignores_none_max_events(monkeypatch):
     }
     calls = []
     monkeypatch.setattr(httpx, "AsyncClient", _mock_async_client(responses, calls))
-    monkeypatch.setattr(settings, "GLOBAL_MIN_LIQUIDITY", 0.0)
-    monkeypatch.setattr(settings, "GLOBAL_MIN_VOLUME_24H", 0.0)
+    monkeypatch.setattr(defaults, "GLOBAL_MIN_LIQUIDITY", 0.0)
+    monkeypatch.setattr(defaults, "GLOBAL_MIN_VOLUME_24H", 0.0)
     monkeypatch.setattr(settings, "POLY_MAX_EVENTS", None)
     monkeypatch.setattr(settings, "POLY_MAX_PAGES", None)
 
