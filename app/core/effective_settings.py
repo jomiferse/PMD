@@ -40,6 +40,7 @@ _CODE_DEFAULTS = {
     "fast_signals_enabled": defaults.DEFAULT_FAST_SIGNALS_ENABLED,
     "allow_info_alerts": defaults.DEFAULT_ALLOW_INFO_ALERTS,
     "allow_fast_alerts": defaults.DEFAULT_ALLOW_FAST_ALERTS,
+    "fast_mode": "WATCH_ONLY",
     "fast_window_minutes": defaults.DEFAULT_FAST_WINDOW_MINUTES,
     "fast_max_themes_per_digest": defaults.DEFAULT_FAST_MAX_THEMES_PER_DIGEST,
     "fast_max_markets_per_theme": defaults.DEFAULT_FAST_MAX_MARKETS_PER_THEME,
@@ -72,6 +73,7 @@ class EffectiveSettings:
     fast_signals_enabled: bool
     allow_info_alerts: bool
     allow_fast_alerts: bool
+    fast_mode: str
     fast_window_minutes: int
     fast_max_themes_per_digest: int
     fast_max_markets_per_theme: int
@@ -167,6 +169,7 @@ def resolve_effective_settings(
         fast_signals_enabled=bool(effective["fast_signals_enabled"]),
         allow_info_alerts=bool(effective["allow_info_alerts"]),
         allow_fast_alerts=bool(effective["allow_fast_alerts"]),
+        fast_mode=str(effective["fast_mode"]),
         fast_window_minutes=int(effective["fast_window_minutes"]),
         fast_max_themes_per_digest=int(effective["fast_max_themes_per_digest"]),
         fast_max_markets_per_theme=int(effective["fast_max_markets_per_theme"]),
@@ -253,6 +256,10 @@ def _apply_overrides(effective: dict, overrides: dict) -> None:
             parsed = _parse_strengths(raw_value)
             if parsed:
                 effective[key] = parsed
+            continue
+        if key == "fast_mode":
+            if isinstance(raw_value, str) and raw_value.strip():
+                effective[key] = raw_value.strip().upper()
             continue
         if key in {"fast_signals_enabled"}:
             parsed = _coerce_bool(raw_value)
@@ -398,6 +405,7 @@ def _serialize_effective_settings(settings_obj: EffectiveSettings) -> dict:
         "fast_signals_enabled": settings_obj.fast_signals_enabled,
         "allow_info_alerts": settings_obj.allow_info_alerts,
         "allow_fast_alerts": settings_obj.allow_fast_alerts,
+        "fast_mode": settings_obj.fast_mode,
         "fast_window_minutes": settings_obj.fast_window_minutes,
         "fast_max_themes_per_digest": settings_obj.fast_max_themes_per_digest,
         "fast_max_markets_per_theme": settings_obj.fast_max_markets_per_theme,
@@ -431,6 +439,7 @@ def _deserialize_effective_settings(payload: dict) -> EffectiveSettings | None:
             fast_signals_enabled=bool(payload.get("fast_signals_enabled", False)),
             allow_info_alerts=bool(payload.get("allow_info_alerts", defaults.DEFAULT_ALLOW_INFO_ALERTS)),
             allow_fast_alerts=bool(payload.get("allow_fast_alerts", defaults.DEFAULT_ALLOW_FAST_ALERTS)),
+            fast_mode=str(payload.get("fast_mode", "WATCH_ONLY")),
             fast_window_minutes=int(payload.get("fast_window_minutes", 0)),
             fast_max_themes_per_digest=int(payload.get("fast_max_themes_per_digest", 0)),
             fast_max_markets_per_theme=int(payload.get("fast_max_markets_per_theme", 0)),

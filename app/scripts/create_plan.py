@@ -37,6 +37,7 @@ def upsert_plan(args: argparse.Namespace) -> None:
             "min_abs_move",
             "p_min",
             "p_max",
+            "fast_mode",
             "fast_window_minutes",
             "fast_max_themes_per_digest",
             "fast_max_markets_per_theme",
@@ -79,6 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--p-min", type=float)
     parser.add_argument("--p-max", type=float)
     parser.add_argument("--allowed-strengths", help="Comma list: STRONG or STRONG,MEDIUM")
+    parser.add_argument("--fast-mode", help="FAST mode: WATCH_ONLY or FULL")
     parser.add_argument("--fast-window-minutes", type=int)
     parser.add_argument("--fast-max-themes-per-digest", type=int)
     parser.add_argument("--fast-max-markets-per-theme", type=int)

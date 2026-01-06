@@ -7,10 +7,10 @@ from . import defaults
 from .alert_classification import AlertClass
 
 
-DEFAULT_PLAN_NAME = "basic"
+DEFAULT_PLAN_NAME = "free"
 RECOMMENDED_PLAN_NAME = "pro"
 UPGRADE_PATH = {
-    "basic": "pro",
+    "free": "pro",
     "pro": "elite",
     "elite": None,
 }
@@ -37,6 +37,7 @@ class PlanSeed:
     p_max: float
     allowed_strengths: str
     fast_signals_enabled: bool
+    fast_mode: str
     fast_window_minutes: int
     fast_max_themes_per_digest: int
     fast_max_markets_per_theme: int
@@ -62,6 +63,7 @@ class PlanSeed:
             "p_max": self.p_max,
             "allowed_strengths": self.allowed_strengths,
             "fast_signals_enabled": self.fast_signals_enabled,
+            "fast_mode": self.fast_mode,
             "fast_window_minutes": self.fast_window_minutes,
             "fast_max_themes_per_digest": self.fast_max_themes_per_digest,
             "fast_max_markets_per_theme": self.fast_max_markets_per_theme,
@@ -70,8 +72,8 @@ class PlanSeed:
 
 PLAN_SEEDS = [
     PlanSeed(
-        name="basic",
-        price_monthly=10.0,
+        name="free",
+        price_monthly=0.0,
         copilot_enabled=False,
         max_copilot_per_day=0,
         max_fast_copilot_per_day=0,
@@ -89,6 +91,7 @@ PLAN_SEEDS = [
         p_max=0.85,
         allowed_strengths="STRONG",
         fast_signals_enabled=False,
+        fast_mode="WATCH_ONLY",
         fast_window_minutes=15,
         fast_max_themes_per_digest=2,
         fast_max_markets_per_theme=2,
@@ -97,9 +100,9 @@ PLAN_SEEDS = [
         name="pro",
         price_monthly=29.0,
         copilot_enabled=True,
-        max_copilot_per_day=3,
-        max_fast_copilot_per_day=3,
-        max_copilot_per_hour=defaults.DEFAULT_MAX_COPILOT_PER_HOUR,
+        max_copilot_per_day=30,
+        max_fast_copilot_per_day=30,
+        max_copilot_per_hour=3,
         max_copilot_per_digest=1,
         copilot_theme_ttl_minutes=360,
         digest_window_minutes=30,
@@ -113,6 +116,7 @@ PLAN_SEEDS = [
         p_max=0.85,
         allowed_strengths="STRONG,MEDIUM",
         fast_signals_enabled=True,
+        fast_mode="WATCH_ONLY",
         fast_window_minutes=10,
         fast_max_themes_per_digest=2,
         fast_max_markets_per_theme=2,
@@ -137,6 +141,7 @@ PLAN_SEEDS = [
         p_max=0.85,
         allowed_strengths="STRONG,MEDIUM",
         fast_signals_enabled=True,
+        fast_mode="FULL",
         fast_window_minutes=5,
         fast_max_themes_per_digest=2,
         fast_max_markets_per_theme=2,
@@ -171,7 +176,7 @@ class PlanAlertRules:
 
 
 PLAN_ALERT_RULES: dict[str, PlanAlertRules] = {
-    "basic": PlanAlertRules(
+    "free": PlanAlertRules(
         allow_info_alerts=False,
         allow_fast_alerts=False,
         soft_band=(defaults.DEFAULT_SOFT_P_MIN, defaults.DEFAULT_SOFT_P_MAX),

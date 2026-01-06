@@ -12,7 +12,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Create a new API key")
     parser.add_argument("--name", required=True, help="Key name (e.g., 'prod')")
     parser.add_argument("--tenant-id", default=settings.DEFAULT_TENANT_ID)
-    parser.add_argument("--plan", default="basic")
+    parser.add_argument("--plan", default="free")
     parser.add_argument("--rate-limit-per-min", type=int, default=settings.RATE_LIMIT_DEFAULT_PER_MIN)
     args = parser.parse_args()
 

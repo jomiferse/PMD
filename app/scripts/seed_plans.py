@@ -27,7 +27,7 @@ def seed_plans() -> None:
             raise SystemExit(f"missing default plan: {DEFAULT_PLAN_NAME}")
         db.query(User).update({User.plan_id: default_plan.id})
         db.commit()
-        print("seeded plans and assigned users to basic")
+        print("seeded plans and assigned users to free")
     finally:
         db.close()
 
