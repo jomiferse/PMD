@@ -16,6 +16,7 @@ from app.core.alerts import (
     _send_user_digest,
 )
 from app.core.effective_settings import _parse_strengths
+from app.db import Base
 from app.models import Alert, AlertDelivery
 from app.core import defaults
 
@@ -23,8 +24,7 @@ from app.core import defaults
 @pytest.fixture()
 def db_session():
     engine = create_engine("sqlite:///:memory:", future=True)
-    Alert.__table__.create(bind=engine)
-    AlertDelivery.__table__.create(bind=engine)
+    Base.metadata.create_all(bind=engine)
     SessionLocal = sessionmaker(bind=engine)
     session = SessionLocal()
     try:
