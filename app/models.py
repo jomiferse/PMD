@@ -106,6 +106,7 @@ class Plan(Base):
     copilot_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     max_copilot_per_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_fast_copilot_per_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_copilot_per_hour: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_copilot_per_digest: Mapped[int | None] = mapped_column(Integer, nullable=True)
     copilot_theme_ttl_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     fast_signals_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
@@ -275,4 +276,3 @@ class AiRecommendationEvent(Base):
     action: Mapped[str] = mapped_column(String(32), nullable=False)
     details: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     created_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), nullable=False)
-

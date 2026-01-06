@@ -43,6 +43,7 @@ COPILOT_THEME_DEDUPE_KEY = "copilot:theme:{user_id}:{theme_key}"
 COPILOT_FAST_THEME_DEDUPE_KEY = "copilot:fast:theme:{user_id}:{theme_key}"
 COPILOT_DAILY_COUNT_KEY = "copilot:count:{user_id}:{date}"
 COPILOT_FAST_DAILY_COUNT_KEY = "copilot:fast:count:{user_id}:{date}"
+COPILOT_HOURLY_COUNT_KEY = "copilot:hour:{user_id}:{hour}"
 COPILOT_RUN_KEY = "copilot:run:{run_id}"
 COPILOT_LAST_STATUS_KEY = "copilot:last_status:{user_id}"
 COPILOT_LAST_STATUS_TTL_SECONDS = 60 * 60 * 24
@@ -357,6 +358,11 @@ def _copilot_daily_count_key(
     return COPILOT_DAILY_COUNT_KEY.format(user_id=user_id, date=date_key)
 
 
+def _copilot_hourly_count_key(user_id: Any, now_ts: datetime) -> str:
+    hour_key = now_ts.strftime("%Y-%m-%d-%H")
+    return COPILOT_HOURLY_COUNT_KEY.format(user_id=user_id, hour=hour_key)
+
+
 def _increment_copilot_daily_count(user_id: Any, signal_speed: str = SIGNAL_SPEED_STANDARD) -> None:
     if not user_id:
         return
@@ -368,6 +374,19 @@ def _increment_copilot_daily_count(user_id: Any, signal_speed: str = SIGNAL_SPEE
         redis_conn.expire(key, ttl_seconds)
     except Exception:
         logger.exception("copilot_daily_count_increment_failed user_id=%s", user_id)
+
+
+def _increment_copilot_hourly_count(user_id: Any) -> None:
+    if not user_id:
+        return
+    now_ts = datetime.now(timezone.utc)
+    key = _copilot_hourly_count_key(user_id, now_ts)
+    ttl_seconds = max(int(defaults.COPILOT_HOURLY_TTL_SECONDS), 60)
+    try:
+        redis_conn.incr(key)
+        redis_conn.expire(key, ttl_seconds)
+    except Exception:
+        logger.exception("copilot_hourly_count_increment_failed user_id=%s", user_id)
 
 
 def init_copilot_run(
@@ -541,6 +560,7 @@ def _send_recommendation_message(
     if success:
         message_id = response.get("result", {}).get("message_id")
         _increment_copilot_daily_count(rec.user_id, signal_speed=signal_speed)
+        _increment_copilot_hourly_count(rec.user_id)
         _increment_copilot_run_counter(run_id, "telegram_sends_succeeded", 1)
         logger.info(
             "copilot_decision_sent user_id=%s alert_id=%s rec_id=%s recommendation=%s confidence=%s signal_speed=%s",
@@ -595,8 +615,9 @@ def _format_ai_message(
     move = _format_move(alert)
     liq = _format_liquidity(alert)
     evidence_block = _format_evidence_lines(evidence)
-    rationale = _format_bullets(rec.rationale)
-    risk_parts = _split_bullet_text(rec.risks)
+    rationale_parts = _sanitize_threshold_claims(_split_bullet_text(rec.rationale), alert)
+    risk_parts = _sanitize_threshold_claims(_split_bullet_text(rec.risks), alert)
+    rationale = _format_bullet_parts(rationale_parts)
     rationale_header = "<b>Rationale</b>"
     risks_header = "<b>Risks</b>"
     what_changes_block = None
@@ -605,19 +626,19 @@ def _format_ai_message(
         rationale_header = "<b>Rationale (why not entering now)</b>"
         risks_header = f"<b>Risks (what could invalidate this {hold_label})</b>"
         rr_note = _extreme_prob_risk_reward(alert)
-        if rr_note and not any("risk/reward" in part.lower() or "risk reward" in part.lower() for part in risk_parts):
+        if rr_note and rr_note not in risk_parts:
             risk_parts.append(rr_note)
         what_changes_block = _format_bullet_parts(_build_wait_change_signals(alert, evidence))
     risks = _format_bullet_parts(risk_parts)
 
     display_action = rec.recommendation
     header = f"<b>AI Copilot: {rec.recommendation} ({rec.confidence})</b>"
-    fast_window = window_minutes
+    signal_window = window_minutes
     if signal_speed == SIGNAL_SPEED_FAST:
-        if fast_window is None:
-            fast_window = _parse_window_minutes_from_evidence(evidence)
-        if fast_window is None:
-            fast_window = 0
+        if signal_window is None:
+            signal_window = _parse_window_minutes_from_evidence(evidence)
+        if signal_window is None:
+            signal_window = 0
         if rec.recommendation in {"WAIT", "SKIP"}:
             display_action = "WATCH"
         header = f"<b>FAST Copilot: {display_action} (Early Signal)</b>"
@@ -626,7 +647,8 @@ def _format_ai_message(
         header,
     ]
     if signal_speed == SIGNAL_SPEED_FAST:
-        lines.append(f"Early move in last {fast_window}m")
+        context_window = _parse_window_minutes_from_evidence(evidence) or signal_window or 0
+        lines.append(f"Signal window: {signal_window}m | Context window: {context_window}m")
     lines.extend(
         [
             title,
@@ -774,6 +796,31 @@ def _split_bullet_text(text: str) -> list[str]:
     if not text:
         return []
     return [part.strip(" -") for part in text.replace("\n", ";").split(";") if part.strip()]
+
+
+def _sanitize_threshold_claims(parts: list[str], alert: Alert) -> list[str]:
+    if not parts:
+        return parts
+    p_value = alert.market_p_yes
+    threshold_pattern = re.compile(
+        r"(?:\b0?\.?15\b|\b15%\b|\b15\s*percent\b|\b0?\.?85\b|\b85%\b|\b85\s*percent\b)",
+        re.IGNORECASE,
+    )
+    filtered = [part for part in parts if not threshold_pattern.search(part)]
+    if p_value is None:
+        return filtered
+    low = p_value < defaults.DEFAULT_P_MIN
+    high = p_value > defaults.DEFAULT_P_MAX
+    if not (low or high):
+        return filtered
+    label = _format_probability_label(alert)
+    pct = p_value * 100
+    threshold_pct = defaults.DEFAULT_P_MIN * 100 if low else defaults.DEFAULT_P_MAX * 100
+    direction = "below" if low else "above"
+    filtered.append(
+        f"Risk/reward skew: {label} at {pct:.1f}% is {direction} {threshold_pct:.0f}%."
+    )
+    return filtered
 
 
 def _format_bullet_parts(parts: list[str]) -> str:
@@ -1112,10 +1159,19 @@ def _reversal_line(
 ) -> str:
     if len(points) < 2 or move_abs <= 0:
         return f"No reversal observed in last {window_minutes}m"
-    last_delta = points[-1][1] - points[-2][1]
-    if last_delta * direction < 0:
-        retrace_pct = abs(last_delta) / move_abs * 100
-        return f"Reversal risk: last snapshot retraced {retrace_pct:.1f}%"
+    baseline = points[0][1]
+    last = points[-1][1]
+    if direction >= 0:
+        peak = max(price for _, price in points)
+        total_move = peak - baseline
+        retrace = (peak - last) / total_move if total_move > 0 else 0
+    else:
+        peak = min(price for _, price in points)
+        total_move = baseline - peak
+        retrace = (last - peak) / total_move if total_move > 0 else 0
+    if retrace > 0:
+        retrace_pct = retrace * 100
+        return f"Reversal risk: last snapshot retraced {retrace_pct:.1f}% of peak move"
     return f"No reversal observed in last {window_minutes}m"
 
 

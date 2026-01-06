@@ -53,7 +53,7 @@ def main() -> None:
         if not decision.deliver:
             print(f"Not actionable: {decision.reason}")
             return
-        evaluations = _enqueue_ai_recommendations(
+        result = _enqueue_ai_recommendations(
             db,
             config,
             [alert],
@@ -66,7 +66,7 @@ def main() -> None:
         )
         summary = [
             {"theme_key": ev.theme_key, "market_id": ev.market_id, "reasons": ev.reasons}
-            for ev in evaluations
+            for ev in result.evaluations
         ]
         print("Copilot evaluation:", json.dumps(summary, indent=2))
         if args.enqueue:

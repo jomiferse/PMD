@@ -140,7 +140,10 @@ def test_pro_plan_daily_cap_respected(db_session, monkeypatch):
         "app.core.alerts.classify_alert_with_snapshots",
         lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
     )
-    monkeypatch.setattr("app.core.alerts._count_snapshot_points", lambda *_args, **_kwargs: 3)
+    monkeypatch.setattr(
+        "app.core.alerts._count_snapshot_points_bulk",
+        lambda *_args, **_kwargs: {alert.market_id: 3},
+    )
     monkeypatch.setattr("app.core.alerts._label_mapping_unknown", lambda *_args, **_kwargs: False)
     enqueued = []
     monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: enqueued.append(args))
@@ -201,7 +204,10 @@ def test_cap_reached_message_includes_plan_and_limits(db_session, monkeypatch):
         "app.core.alerts.classify_alert_with_snapshots",
         lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
     )
-    monkeypatch.setattr("app.core.alerts._count_snapshot_points", lambda *_args, **_kwargs: 3)
+    monkeypatch.setattr(
+        "app.core.alerts._count_snapshot_points_bulk",
+        lambda *_args, **_kwargs: {alert.market_id: 3},
+    )
     monkeypatch.setattr("app.core.alerts._label_mapping_unknown", lambda *_args, **_kwargs: False)
     monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: None)
 

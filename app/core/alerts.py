@@ -13,7 +13,7 @@ from uuid import UUID, uuid4
 import httpx
 import redis
 from rq import Queue
-from sqlalchemy import inspect
+from sqlalchemy import func, inspect
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -56,6 +56,7 @@ COPILOT_FAST_THEME_DEDUPE_KEY = "copilot:fast:theme:{user_id}:{theme_key}"
 COPILOT_LAST_EVAL_KEY = "copilot:last_eval:{user_id}"
 COPILOT_DAILY_COUNT_KEY = "copilot:count:{user_id}:{date}"
 COPILOT_FAST_DAILY_COUNT_KEY = "copilot:fast:count:{user_id}:{date}"
+COPILOT_HOURLY_COUNT_KEY = "copilot:hour:{user_id}:{hour}"
 COPILOT_LAST_EVAL_TTL_SECONDS = 60 * 60 * 24
 
 DELIVERY_STATUS_SENT = "sent"
@@ -86,6 +87,7 @@ class UserDigestConfig:
     plan_name: str | None
     max_copilot_per_day: int
     max_fast_copilot_per_day: int
+    max_copilot_per_hour: int
     max_copilot_per_digest: int
     copilot_theme_ttl_minutes: int
     max_themes_per_digest: int
@@ -194,6 +196,15 @@ class CopilotThemeEvaluation:
             _sort_copilot_reasons(self.reasons)
 
 
+@dataclass(frozen=True)
+class CopilotEnqueueResult:
+    evaluations: list[CopilotThemeEvaluation]
+    selected_theme_keys: list[str]
+    enqueued: int
+    eligible_count: int
+    cap_reached_reason: str | None
+
+
 async def send_user_digests(db: Session, tenant_id: str) -> dict | None:
     if not settings.TELEGRAM_BOT_TOKEN:
         return {"ok": False, "reason": "telegram_disabled"}
@@ -300,6 +311,7 @@ def _resolve_user_preferences(
         plan_name=effective.plan_name,
         max_copilot_per_day=max(int(effective.max_copilot_per_day), 0),
         max_fast_copilot_per_day=max(int(effective.max_fast_copilot_per_day), 0),
+        max_copilot_per_hour=max(int(effective.max_copilot_per_hour), 0),
         max_copilot_per_digest=max(int(effective.max_copilot_per_digest), 1),
         copilot_theme_ttl_minutes=max(int(effective.copilot_theme_ttl_minutes), 1),
         max_themes_per_digest=max(int(effective.max_themes_per_digest), 1),
@@ -351,6 +363,8 @@ async def _send_user_digest(
     filter_reason_events: list[str] = []
     window_minutes = max(config.digest_window_minutes, 1)
     now_ts = datetime.now(timezone.utc)
+    hourly_limit = max(config.max_copilot_per_hour, 0)
+    hourly_count = _get_copilot_hourly_count(config.user_id, now_ts)
 
     if _digest_recently_sent(config.user_id, now_ts, window_minutes):
         _emit_copilot_run_summary(
@@ -365,6 +379,8 @@ async def _send_user_digest(
             skipped_by_reason_counts={COPILOT_RUN_SKIP_RECENT_DIGEST: 1},
             daily_count=0,
             daily_limit=max(config.max_copilot_per_day, 0),
+            hourly_count=hourly_count,
+            hourly_limit=hourly_limit,
             digest_limit=max(config.max_copilot_per_digest, 1),
             llm_calls_attempted=0,
             llm_calls_succeeded=0,
@@ -398,6 +414,8 @@ async def _send_user_digest(
             skipped_by_reason_counts={COPILOT_RUN_SKIP_NO_ALERTS: 1},
             daily_count=0,
             daily_limit=max(config.max_copilot_per_day, 0),
+            hourly_count=hourly_count,
+            hourly_limit=hourly_limit,
             digest_limit=max(config.max_copilot_per_digest, 1),
             llm_calls_attempted=0,
             llm_calls_succeeded=0,
@@ -459,6 +477,8 @@ async def _send_user_digest(
             skipped_by_reason_counts={COPILOT_RUN_SKIP_MISSING_CHAT_ID: 1},
             daily_count=0,
             daily_limit=max(config.max_copilot_per_day, 0),
+            hourly_count=hourly_count,
+            hourly_limit=hourly_limit,
             digest_limit=max(config.max_copilot_per_digest, 1),
             llm_calls_attempted=0,
             llm_calls_succeeded=0,
@@ -527,8 +547,9 @@ async def _send_user_digest(
             )
             filtered_for_delivery.append(alert)
 
+    copilot_result: CopilotEnqueueResult | None = None
     if actionable_alerts:
-        _enqueue_ai_recommendations(
+        copilot_result = _enqueue_ai_recommendations(
             db,
             config,
             actionable_alerts,
@@ -551,6 +572,8 @@ async def _send_user_digest(
             skipped_by_reason_counts={COPILOT_RUN_SKIP_NO_ACTIONABLE_THEMES: 1},
             daily_count=0,
             daily_limit=max(config.max_copilot_per_day, 0),
+            hourly_count=hourly_count,
+            hourly_limit=hourly_limit,
             digest_limit=max(config.max_copilot_per_digest, 1),
             llm_calls_attempted=0,
             llm_calls_succeeded=0,
@@ -611,6 +634,9 @@ async def _send_user_digest(
         )
         _log_digest_metrics(config.user_id, metrics, filter_reason_events)
         return {"user_id": str(config.user_id), "sent": False, "reason": "empty_message"}
+
+    copilot_note = _copilot_skip_note(config, copilot_result)
+    text = _append_copilot_note(text, copilot_note)
 
     if fast_section:
         text = _append_fast_section(text, fast_section)
@@ -1088,6 +1114,55 @@ def _rank_alerts(alerts: list[Alert]) -> list[Alert]:
     )
 
 
+def _score_copilot_theme(theme: Theme) -> float:
+    rep = theme.representative
+    abs_move = abs(_signed_price_delta(rep))
+    if abs_move <= 0:
+        abs_move = abs(rep.move or 0.0)
+    liquidity = rep.liquidity or 0.0
+    volume = rep.volume_24h or 0.0
+    sustained = max(int(getattr(rep, "sustained_snapshots", 1) or 1), 1)
+
+    def _factor(value: float, threshold: float) -> float:
+        if threshold <= 0:
+            return 1.0
+        return 1.0 + min(value / threshold, 3.0)
+
+    liquidity_factor = _factor(liquidity, defaults.STRONG_MIN_LIQUIDITY)
+    volume_factor = _factor(volume, defaults.STRONG_MIN_VOLUME_24H)
+    sustained_factor = float(sustained)
+    return abs_move * liquidity_factor * volume_factor * sustained_factor
+
+
+def _rotate_themes_by_category(themes: list[Theme], limit: int) -> list[Theme]:
+    if limit <= 0:
+        return []
+    buckets: dict[str, list[Theme]] = {}
+    order: list[str] = []
+    for theme in themes:
+        category = (theme.representative.category or "unknown").lower()
+        if category not in buckets:
+            buckets[category] = []
+            order.append(category)
+        buckets[category].append(theme)
+    selected: list[Theme] = []
+    while len(selected) < limit and order:
+        made_progress = False
+        for category in list(order):
+            bucket = buckets.get(category, [])
+            if not bucket:
+                if category in order:
+                    order.remove(category)
+                continue
+            selected.append(bucket.pop(0))
+            made_progress = True
+            if len(selected) >= limit:
+                break
+        if not made_progress:
+            break
+    return selected
+
+
 def _dedupe_by_market_id(
     alerts: list[Alert],
     exclude_market_ids: set[str] | None = None,
@@ -1163,6 +1238,17 @@ def _append_fast_section(confirmed_text: str, fast_section: str) -> str:
         fast_section = fast_section.strip()
         return f"{base}\n\n{fast_section}\n\n{footer}"
     return f"{confirmed_text}\n\n{fast_section}"
+
+
+def _append_copilot_note(confirmed_text: str, note: str | None) -> str:
+    if not note:
+        return confirmed_text
+    footer = READ_ONLY_DISCLAIMER
+    if footer in confirmed_text:
+        base, _ = confirmed_text.rsplit(footer, 1)
+        base = base.rstrip()
+        return f"{base}\n\n{note}\n\n{footer}"
+    return f"{confirmed_text}\n\n{note}"
 
 
 def _format_fast_digest_message(
@@ -1328,17 +1414,17 @@ def _sustained_snapshot_count(
     direction: int,
 ) -> int:
     if not points:
-        return 0
+        return 1
     if len(points) < 2:
         return 1
-    streak_deltas = 0
+    streak = 1
     for idx in range(len(points) - 1, 0, -1):
         delta = points[idx][1] - points[idx - 1][1]
         if delta * direction > 0:
-            streak_deltas += 1
+            streak += 1
         else:
             break
-    return max(streak_deltas + 1, 1)
+    return max(streak, 1)
 
 
 def _reversal_flag(points: list[tuple[datetime, float]], direction: int) -> str:
@@ -1346,22 +1432,22 @@ def _reversal_flag(points: list[tuple[datetime, float]], direction: int) -> str:
         return "none"
     baseline = points[0][1]
     last = points[-1][1]
-    prev = points[-2][1]
     if direction >= 0:
         peak = max(price for _, price in points)
-        if peak <= baseline:
+        total_move = peak - baseline
+        if total_move <= 0:
             return "none"
-        if last <= baseline and prev <= baseline:
-            return "full"
-        if last < peak and prev < peak:
-            return "partial"
-        return "none"
-    peak = min(price for _, price in points)
-    if peak >= baseline:
-        return "none"
-    if last >= baseline and prev >= baseline:
+        retrace_last = (peak - last) / total_move
+    else:
+        peak = min(price for _, price in points)
+        total_move = baseline - peak
+        if total_move <= 0:
+            return "none"
+        retrace_last = (last - peak) / total_move
+
+    if retrace_last >= 1.0:
         return "full"
-    if last > peak and prev > peak:
+    if retrace_last >= 0.5:
         return "partial"
     return "none"
 
@@ -1689,6 +1775,29 @@ def _count_snapshot_points(db: Session, alert: Alert, max_points: int = 5) -> in
     return len(points)
 
 
+def _count_snapshot_points_bulk(
+    db: Session,
+    alerts: list[Alert],
+    window_start: datetime,
+    window_end: datetime,
+) -> dict[str, int]:
+    market_ids = {alert.market_id for alert in alerts if alert.market_id}
+    if not market_ids:
+        return {}
+    rows = (
+        db.query(MarketSnapshot.market_id, func.count(MarketSnapshot.market_id))
+        .filter(
+            MarketSnapshot.market_id.in_(market_ids),
+            MarketSnapshot.snapshot_bucket >= window_start,
+            MarketSnapshot.snapshot_bucket <= window_end,
+            MarketSnapshot.market_p_yes.isnot(None),
+        )
+        .group_by(MarketSnapshot.market_id)
+        .all()
+    )
+    return {market_id: int(count) for market_id, count in rows}
+
+
 def _missing_price_or_liquidity(alert: Alert) -> bool:
     missing_price = alert.old_price is None or alert.new_price is None
     missing_liquidity = alert.liquidity is None or alert.volume_24h is None
@@ -1707,6 +1816,11 @@ def _copilot_daily_count_key(user_id: UUID, now_ts: datetime, signal_speed: str 
     return COPILOT_DAILY_COUNT_KEY.format(user_id=user_id, date=date_key)
 
 
+def _copilot_hourly_count_key(user_id: UUID, now_ts: datetime) -> str:
+    hour_key = now_ts.strftime("%Y-%m-%d-%H")
+    return COPILOT_HOURLY_COUNT_KEY.format(user_id=user_id, hour=hour_key)
+
+
 def _get_copilot_daily_count(
     user_id: UUID,
     now_ts: datetime,
@@ -1722,6 +1836,20 @@ def _get_copilot_daily_count(
         return int(raw)
     except Exception:
         logger.exception("copilot_daily_count_lookup_failed user_id=%s", user_id)
+        return 0
+
+
+def _get_copilot_hourly_count(user_id: UUID, now_ts: datetime) -> int:
+    key = _copilot_hourly_count_key(user_id, now_ts)
+    try:
+        raw = redis_conn.get(key)
+        if raw is None:
+            return 0
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode()
+        return int(raw)
+    except Exception:
+        logger.exception("copilot_hourly_count_lookup_failed user_id=%s", user_id)
         return 0
 
 
@@ -1830,9 +1958,9 @@ def _enqueue_ai_recommendations(
     run_started_at: float | None = None,
     digest_window_minutes: int | None = None,
     enqueue_jobs: bool = True,
-) -> list[CopilotThemeEvaluation]:
+) -> CopilotEnqueueResult:
     if not actionable_alerts:
-        return []
+        return CopilotEnqueueResult([], [], 0, 0, None)
     now_ts = datetime.now(timezone.utc)
     run_started_at = run_started_at or time.time()
     if classifier is None:
@@ -1840,13 +1968,16 @@ def _enqueue_ai_recommendations(
     window_minutes = digest_window_minutes or config.digest_window_minutes
     daily_limit = max(config.max_copilot_per_day, 0)
     fast_daily_limit = max(config.max_fast_copilot_per_day, 0)
+    hourly_limit = max(config.max_copilot_per_hour, 0)
     digest_limit = max(config.max_copilot_per_digest, 1)
     daily_count = _get_copilot_daily_count(config.user_id, now_ts, SIGNAL_SPEED_STANDARD)
     fast_daily_count = _get_copilot_daily_count(config.user_id, now_ts, SIGNAL_SPEED_FAST)
+    hourly_count = _get_copilot_hourly_count(config.user_id, now_ts)
     remaining_daily_by_speed = {
         SIGNAL_SPEED_STANDARD: max(daily_limit - daily_count, 0),
         SIGNAL_SPEED_FAST: max(fast_daily_limit - fast_daily_count, 0),
     }
+    remaining_hourly = max(hourly_limit - hourly_count, 0)
     sent_this_digest = 0
     cap_reached_reason: str | None = None
     selected_theme_keys: list[str] = []
@@ -1887,10 +2018,20 @@ def _enqueue_ai_recommendations(
             evaluations=[],
             daily_count=daily_count,
             daily_limit=daily_limit,
+            hourly_count=hourly_count,
+            hourly_limit=hourly_limit,
             digest_limit=digest_limit,
             enqueued=0,
         )
-        return []
+        return CopilotEnqueueResult([], [], 0, 0, None)
+
+    window_start = now_ts - timedelta(minutes=max(int(window_minutes), 1))
+    snapshot_counts = _count_snapshot_points_bulk(
+        db,
+        [theme.representative for theme in themes],
+        window_start,
+        now_ts,
+    )
 
     muted_market_ids = {
         row.market_id
@@ -1919,7 +2060,9 @@ def _enqueue_ai_recommendations(
         rep_classification = theme.representative_classification
         if rep_classification is None:
             rep_classification = classifier(rep) if classifier else classify_alert_with_snapshots(db, rep)
-        snapshot_count = _count_snapshot_points(db, rep)
+        snapshot_count = snapshot_counts.get(rep.market_id, 0)
+        if snapshot_count <= 0:
+            snapshot_count = 1
         setattr(rep, "sustained_snapshots", snapshot_count)
         signal_speed = classify_signal_speed(rep, window_minutes)
         theme.signal_speed = signal_speed
@@ -2011,16 +2154,24 @@ def _enqueue_ai_recommendations(
             evaluations=evaluations,
             daily_count=daily_count,
             daily_limit=daily_limit,
+            hourly_count=hourly_count,
+            hourly_limit=hourly_limit,
             digest_limit=digest_limit,
             enqueued=0,
         )
-        return evaluations
+        return CopilotEnqueueResult(evaluations, [], 0, 0, cap_reached_reason)
 
     ranked = sorted(
         eligible_themes,
-        key=lambda theme: (theme.representative.liquidity, theme.representative.volume_24h),
+        key=lambda theme: (
+            _score_copilot_theme(theme),
+            theme.representative.liquidity,
+            theme.representative.volume_24h,
+            theme.key,
+        ),
         reverse=True,
     )
+    ranked = _rotate_themes_by_category(ranked, limit=len(ranked))
 
     candidate_ids = [theme.representative.id for theme in ranked if theme.representative.id is not None]
     existing_alert_ids = set()
@@ -2038,6 +2189,20 @@ def _enqueue_ai_recommendations(
     enqueued = 0
     for idx, theme in enumerate(ranked):
         signal_speed = theme.signal_speed or SIGNAL_SPEED_STANDARD
+        if hourly_limit > 0 and remaining_hourly <= 0:
+            if cap_reached_reason is None:
+                cap_reached_reason = "hourly"
+                logger.debug(
+                    "copilot_cap_reached user_id=%s plan_name=%s hourly=%s/%s digest=%s/%s",
+                    config.user_id,
+                    config.plan_name,
+                    hourly_count,
+                    hourly_limit,
+                    sent_this_digest,
+                    digest_limit,
+                )
+            evaluations_by_key[theme.key].add_reason(CopilotIneligibilityReason.CAP_REACHED.value)
+            continue
         if remaining_daily_by_speed.get(signal_speed, 0) <= 0:
             if signal_speed == SIGNAL_SPEED_STANDARD and cap_reached_reason is None:
                 cap_reached_reason = "daily"
@@ -2101,6 +2266,44 @@ def _enqueue_ai_recommendations(
             enqueued += 1
         sent_this_digest += 1
         remaining_daily_by_speed[signal_speed] = remaining_daily_by_speed.get(signal_speed, 0) - 1
+        remaining_hourly = max(remaining_hourly - 1, 0)
+
+    if (
+        (config.plan_name or "").lower() == "elite"
+        and enqueued == 0
+        and eligible_themes
+        and cap_reached_reason is None
+        and (hourly_limit == 0 or remaining_hourly > 0)
+        and sent_this_digest < digest_limit
+    ):
+        for theme in ranked:
+            signal_speed = theme.signal_speed or SIGNAL_SPEED_STANDARD
+            if remaining_daily_by_speed.get(signal_speed, 0) <= 0:
+                continue
+            alert = theme.representative
+            if alert.id is None or alert.id in existing_alert_ids:
+                continue
+            selected_theme_keys.append(theme.key)
+            if allow_enqueue and enqueue_jobs:
+                queue.enqueue(
+                    ai_recommendation_job,
+                    str(config.user_id),
+                    alert.id,
+                    run_id,
+                    signal_speed,
+                    window_minutes,
+                )
+                enqueued += 1
+            sent_this_digest += 1
+            remaining_daily_by_speed[signal_speed] = remaining_daily_by_speed.get(signal_speed, 0) - 1
+            remaining_hourly = max(remaining_hourly - 1, 0)
+            logger.info(
+                "copilot_elite_override user_id=%s theme_key=%s signal_speed=%s",
+                config.user_id,
+                theme.key,
+                signal_speed,
+            )
+            break
 
     logger.debug(
         "copilot_theme_counts user_id=%s actionable_themes=%s eligible_themes=%s sent=%s",
@@ -2133,10 +2336,18 @@ def _enqueue_ai_recommendations(
         evaluations=evaluations,
         daily_count=daily_count,
         daily_limit=daily_limit,
+        hourly_count=hourly_count,
+        hourly_limit=hourly_limit,
         digest_limit=digest_limit,
         enqueued=enqueued,
     )
-    return evaluations
+    return CopilotEnqueueResult(
+        evaluations,
+        selected_theme_keys,
+        enqueued,
+        len(eligible_themes),
+        cap_reached_reason,
+    )
 
 
 def _build_copilot_run_summary(
@@ -2151,8 +2362,12 @@ def _build_copilot_run_summary(
     skipped_by_reason_counts: dict[str, int],
     daily_count: int,
     daily_limit: int,
+    hourly_count: int,
+    hourly_limit: int,
     digest_limit: int,
 ) -> dict[str, object]:
+    caps_remaining_day = max(daily_limit - daily_count, 0)
+    caps_remaining_hour = max(hourly_limit - hourly_count, 0)
     return {
         "run_id": run_id,
         "user_id": str(config.user_id),
@@ -2164,6 +2379,10 @@ def _build_copilot_run_summary(
         "themes_selected": themes_selected,
         "daily_count": daily_count,
         "daily_limit": daily_limit,
+        "hourly_count": hourly_count,
+        "hourly_limit": hourly_limit,
+        "caps_remaining_day": caps_remaining_day,
+        "caps_remaining_hour": caps_remaining_hour,
         "digest_limit": digest_limit,
         "skipped_by_reason_counts": dict(skipped_by_reason_counts),
         "created_at": now_ts.isoformat(),
@@ -2182,6 +2401,8 @@ def _emit_copilot_run_summary(
     skipped_by_reason_counts: dict[str, int],
     daily_count: int,
     daily_limit: int,
+    hourly_count: int,
+    hourly_limit: int,
     digest_limit: int,
     llm_calls_attempted: int,
     llm_calls_succeeded: int,
@@ -2200,6 +2421,8 @@ def _emit_copilot_run_summary(
         skipped_by_reason_counts=skipped_by_reason_counts,
         daily_count=daily_count,
         daily_limit=daily_limit,
+        hourly_count=hourly_count,
+        hourly_limit=hourly_limit,
         digest_limit=digest_limit,
     )
     duration_ms = 0
@@ -2215,8 +2438,7 @@ def _emit_copilot_run_summary(
         }
     )
     log_copilot_run_summary(summary)
-    if telegram_sends_succeeded == 0:
-        store_copilot_last_status(summary)
+    store_copilot_last_status(summary)
     return summary
 
 
@@ -2233,6 +2455,8 @@ def _record_copilot_run(
     evaluations: list[CopilotThemeEvaluation],
     daily_count: int,
     daily_limit: int,
+    hourly_count: int,
+    hourly_limit: int,
     digest_limit: int,
     enqueued: int,
 ) -> None:
@@ -2254,6 +2478,8 @@ def _record_copilot_run(
         skipped_by_reason_counts=dict(reason_counts),
         daily_count=daily_count,
         daily_limit=daily_limit,
+        hourly_count=hourly_count,
+        hourly_limit=hourly_limit,
         digest_limit=digest_limit,
     )
     if run_id and enqueued > 0:
@@ -2271,6 +2497,8 @@ def _record_copilot_run(
         skipped_by_reason_counts=summary["skipped_by_reason_counts"] if isinstance(summary["skipped_by_reason_counts"], dict) else {},
         daily_count=daily_count,
         daily_limit=daily_limit,
+        hourly_count=hourly_count,
+        hourly_limit=hourly_limit,
         digest_limit=digest_limit,
         llm_calls_attempted=0,
         llm_calls_succeeded=0,
@@ -2288,8 +2516,15 @@ def _build_cap_reached_message(
     if not cap_reached:
         return None
     plan_label = (config.plan_name or "basic").upper()
-    usage_text = daily_usage if cap_reached == "daily" else digest_usage
-    period_label = "today" if cap_reached == "daily" else "this digest"
+    if cap_reached == "daily":
+        usage_text = daily_usage
+        period_label = "today"
+    elif cap_reached == "hourly":
+        usage_text = "hourly"
+        period_label = "this hour"
+    else:
+        usage_text = digest_usage
+        period_label = "this digest"
     upgrade_plan = upgrade_target_name(config.plan_name)
     if upgrade_plan:
         return (
@@ -2524,6 +2759,27 @@ def _extract_underlying(text: str) -> str | None:
         if parts:
             return " ".join(parts)
     return None
+
+
+def _copilot_skip_note(config: UserDigestConfig, result: CopilotEnqueueResult | None) -> str | None:
+    if result is None or result.enqueued > 0:
+        return None
+    if (config.plan_name or "").lower() != "elite":
+        return None
+    if result.cap_reached_reason:
+        period = "hour" if result.cap_reached_reason == "hourly" else "day"
+        if result.cap_reached_reason == "digest":
+            period = "digest"
+        return f"Copilot skipped: CAP_REACHED ({period})"
+    dedupe_hit = any(
+        CopilotIneligibilityReason.COPILOT_DEDUPE_ACTIVE.value in evaluation.reasons
+        for evaluation in result.evaluations
+    )
+    if dedupe_hit:
+        return "Copilot skipped: DEDUPE_HIT"
+    if result.eligible_count <= 0:
+        return "Copilot skipped: NO_ELIGIBLE_THEMES"
+    return "Copilot skipped: NO_ELIGIBLE_THEMES"
 
 
 def _extract_matchup(text: str) -> str | None:

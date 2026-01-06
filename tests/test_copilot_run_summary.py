@@ -155,6 +155,7 @@ def _make_config(user_id):
         plan_name="default",
         max_copilot_per_day=5,
         max_fast_copilot_per_day=5,
+        max_copilot_per_hour=defaults.DEFAULT_MAX_COPILOT_PER_HOUR,
         max_copilot_per_digest=1,
         copilot_theme_ttl_minutes=360,
         max_themes_per_digest=5,

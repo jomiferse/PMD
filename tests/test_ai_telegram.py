@@ -168,8 +168,43 @@ def test_fast_message_includes_label_and_window():
         window_minutes=10,
     )
     assert "FAST Copilot" in text
-    assert "Early move in last 10m" in text
+    assert "Signal window: 10m" in text
     assert "WATCH" in text
+
+
+def test_threshold_claims_removed_when_incorrect():
+    alert = _make_alert(market_p_yes=0.365)
+    rec = AiRecommendation(
+        user_id=uuid4(),
+        alert_id=1,
+        recommendation="WAIT",
+        confidence="LOW",
+        rationale="Edge unclear; stay on sidelines",
+        risks="p below 0.15 is risky",
+        status="PROPOSED",
+        created_at=datetime.now(timezone.utc),
+    )
+    text, _ = _format_ai_message(alert, rec, ["Sustained move across 1 snapshots (0m)"])
+    assert "0.15" not in text
+    assert "15%" not in text
+
+
+def test_threshold_claims_use_actual_probability():
+    alert = _make_alert(market_p_yes=0.1)
+    rec = AiRecommendation(
+        user_id=uuid4(),
+        alert_id=1,
+        recommendation="WAIT",
+        confidence="LOW",
+        rationale="Edge unclear; stay on sidelines",
+        risks="Market thin",
+        status="PROPOSED",
+        created_at=datetime.now(timezone.utc),
+    )
+    text, _ = _format_ai_message(alert, rec, ["Sustained move across 1 snapshots (0m)"])
+    assert "p_yes" in text
+    assert "10.0%" in text
+    assert "below 15%" in text
 
 
 def test_evidence_includes_metrics(db_session):

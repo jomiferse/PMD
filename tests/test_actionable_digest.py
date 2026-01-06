@@ -89,6 +89,7 @@ def _make_config(**overrides):
         plan_name="default",
         max_copilot_per_day=0,
         max_fast_copilot_per_day=0,
+        max_copilot_per_hour=defaults.DEFAULT_MAX_COPILOT_PER_HOUR,
         max_copilot_per_digest=1,
         copilot_theme_ttl_minutes=360,
         max_themes_per_digest=5,

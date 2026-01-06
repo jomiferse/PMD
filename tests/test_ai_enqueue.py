@@ -120,6 +120,7 @@ def _make_config(user_id):
         plan_name="default",
         max_copilot_per_day=5,
         max_fast_copilot_per_day=5,
+        max_copilot_per_hour=defaults.DEFAULT_MAX_COPILOT_PER_HOUR,
         max_copilot_per_digest=1,
         copilot_theme_ttl_minutes=360,
         max_themes_per_digest=5,
@@ -194,6 +195,28 @@ def test_ai_enqueue_respects_daily_cap(db_session, monkeypatch):
     assert not enqueued
 
 
+def test_ai_enqueue_respects_hourly_cap(db_session, monkeypatch):
+    user_id = uuid4()
+    alert = _make_alert(market_id="market-1")
+    db_session.add(alert)
+    db_session.commit()
+
+    enqueued = []
+    fake_redis = FakeRedis()
+    hour_key = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H")
+    fake_redis.store[f"copilot:hour:{user_id}:{hour_key}"] = "1"
+    monkeypatch.setattr("app.core.alerts.redis_conn", fake_redis)
+    monkeypatch.setattr(
+        "app.core.alerts.classify_alert_with_snapshots",
+        lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
+    )
+    monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: enqueued.append(args))
+    config = _make_config(user_id)
+    config = config.__class__(**{**config.__dict__, "max_copilot_per_hour": 1})
+    _enqueue_ai_recommendations(db_session, config, [alert])
+    assert not enqueued
+
+
 def test_ai_enqueue_respects_digest_cap(db_session, monkeypatch):
     user_id = uuid4()
     alerts = [
@@ -213,6 +236,39 @@ def test_ai_enqueue_respects_digest_cap(db_session, monkeypatch):
     config = _make_config(user_id)
     config = config.__class__(**{**config.__dict__, "max_copilot_per_digest": 1})
     _enqueue_ai_recommendations(db_session, config, alerts)
+    assert len(enqueued) == 1
+
+
+def test_elite_copilot_override_bypasses_dedupe(db_session, monkeypatch):
+    user_id = uuid4()
+    alert = _make_alert(
+        market_id="market-1",
+        title="Will the price of Bitcoin be above $50 on Jan 5 2026?",
+    )
+    db_session.add(alert)
+    db_session.commit()
+
+    enqueued = []
+    fake_redis = FakeRedis()
+    theme_key = extract_theme(alert.title, category=alert.category, slug=alert.market_id).theme_key
+    fake_redis.set(f"copilot:theme:{user_id}:{theme_key}", "1", ex=300)
+    monkeypatch.setattr("app.core.alerts.redis_conn", fake_redis)
+    monkeypatch.setattr(
+        "app.core.alerts.classify_alert_with_snapshots",
+        lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
+    )
+    monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: enqueued.append(args))
+
+    config = _make_config(user_id)
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "plan_name": "elite",
+            "max_copilot_per_digest": 1,
+        }
+    )
+    result = _enqueue_ai_recommendations(db_session, config, [alert])
+    assert result.enqueued == 1
     assert len(enqueued) == 1
 
 
@@ -290,13 +346,13 @@ def test_fast_actionable_skips_probability_band_for_copilot(db_session, monkeypa
     enqueued: list = []
     monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: enqueued.append(args))
 
-    evaluations = _enqueue_ai_recommendations(
+    result = _enqueue_ai_recommendations(
         db_session,
         _make_config(user_id),
         [alert],
         classifier=lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
     )
-    assert evaluations and evaluations[0].reasons == []
+    assert result.evaluations and result.evaluations[0].reasons == []
     assert len(enqueued) == 1
 
 
@@ -312,15 +368,18 @@ def test_fast_copilot_skips_snapshot_requirement(db_session, monkeypatch):
         "app.core.alerts.classify_alert_with_snapshots",
         lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "WAIT"),
     )
-    monkeypatch.setattr("app.core.alerts._count_snapshot_points", lambda *_args, **_kwargs: 2)
+    monkeypatch.setattr(
+        "app.core.alerts._count_snapshot_points_bulk",
+        lambda *_args, **_kwargs: {alert.market_id: 2},
+    )
     monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: None)
 
     config = _make_config(user_id)
     config = config.__class__(**{**config.__dict__, "digest_window_minutes": 15})
-    evaluations = _enqueue_ai_recommendations(db_session, config, [alert], digest_window_minutes=15)
+    result = _enqueue_ai_recommendations(db_session, config, [alert], digest_window_minutes=15)
 
-    assert evaluations
-    reasons = evaluations[0].reasons
+    assert result.evaluations
+    reasons = result.evaluations[0].reasons
     assert CopilotIneligibilityReason.NOT_FOLLOW.value in reasons
     assert CopilotIneligibilityReason.INSUFFICIENT_SNAPSHOTS.value not in reasons
 

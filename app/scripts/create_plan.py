@@ -24,6 +24,7 @@ def upsert_plan(args: argparse.Namespace) -> None:
             "copilot_enabled",
             "max_copilot_per_day",
             "max_fast_copilot_per_day",
+            "max_copilot_per_hour",
             "max_copilot_per_digest",
             "copilot_theme_ttl_minutes",
             "fast_signals_enabled",
@@ -64,6 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--copilot-enabled", type=lambda v: v.lower() in {"true", "1", "yes", "y"})
     parser.add_argument("--max-copilot-per-day", type=int)
     parser.add_argument("--max-fast-copilot-per-day", type=int)
+    parser.add_argument("--max-copilot-per-hour", type=int)
     parser.add_argument("--max-copilot-per-digest", type=int)
     parser.add_argument("--copilot-theme-ttl-minutes", type=int)
     parser.add_argument("--fast-signals-enabled", type=lambda v: v.lower() in {"true", "1", "yes", "y"})

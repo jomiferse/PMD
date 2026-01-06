@@ -71,6 +71,17 @@ class FakeRedis:
         self.expirations[key] = self.now + ttl
         return True
 
+    def incr(self, key):
+        self._purge_expired()
+        current = self.store.get(key)
+        if current is None:
+            value = 0
+        else:
+            value = int(current)
+        value += 1
+        self.store[key] = str(value)
+        return value
+
     def delete(self, key):
         self.store.pop(key, None)
         self.expirations.pop(key, None)

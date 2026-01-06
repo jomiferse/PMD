@@ -120,7 +120,10 @@ def test_cap_reached_uses_plan_limits(db_session, monkeypatch):
         "app.core.alerts.classify_alert_with_snapshots",
         lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
     )
-    monkeypatch.setattr("app.core.alerts._count_snapshot_points", lambda *_args, **_kwargs: 3)
+    monkeypatch.setattr(
+        "app.core.alerts._count_snapshot_points_bulk",
+        lambda *_args, **_kwargs: {alert.market_id: 3},
+    )
     monkeypatch.setattr("app.core.alerts._label_mapping_unknown", lambda *_args, **_kwargs: False)
 
     enqueued = []

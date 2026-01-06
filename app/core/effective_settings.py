@@ -20,6 +20,7 @@ EFFECTIVE_SETTINGS_CACHE_TTL_SECONDS = 600
 _CODE_DEFAULTS = {
     "max_copilot_per_day": defaults.DEFAULT_MAX_COPILOT_PER_DAY,
     "max_fast_copilot_per_day": defaults.DEFAULT_MAX_FAST_COPILOT_PER_DAY,
+    "max_copilot_per_hour": defaults.DEFAULT_MAX_COPILOT_PER_HOUR,
     "max_copilot_per_digest": defaults.DEFAULT_MAX_COPILOT_PER_DIGEST,
     "copilot_theme_ttl_minutes": defaults.DEFAULT_COPILOT_THEME_TTL_MINUTES,
     "digest_window_minutes": defaults.DEFAULT_DIGEST_WINDOW_MINUTES,
@@ -51,6 +52,7 @@ class EffectiveSettings:
     copilot_enabled: bool
     max_copilot_per_day: int
     max_fast_copilot_per_day: int
+    max_copilot_per_hour: int
     max_copilot_per_digest: int
     copilot_theme_ttl_minutes: int
     digest_window_minutes: int
@@ -145,6 +147,7 @@ def resolve_effective_settings(
         copilot_enabled=bool(getattr(user, "copilot_enabled", False)) and plan_copilot_enabled,
         max_copilot_per_day=int(effective["max_copilot_per_day"]),
         max_fast_copilot_per_day=int(effective["max_fast_copilot_per_day"]),
+        max_copilot_per_hour=int(effective["max_copilot_per_hour"]),
         max_copilot_per_digest=int(effective["max_copilot_per_digest"]),
         copilot_theme_ttl_minutes=int(effective["copilot_theme_ttl_minutes"]),
         digest_window_minutes=int(effective["digest_window_minutes"]),
@@ -266,6 +269,7 @@ def _apply_overrides(effective: dict, overrides: dict) -> None:
         if key in {
             "max_copilot_per_day",
             "max_fast_copilot_per_day",
+            "max_copilot_per_hour",
             "max_copilot_per_digest",
             "copilot_theme_ttl_minutes",
             "digest_window_minutes",
@@ -374,6 +378,7 @@ def _serialize_effective_settings(settings_obj: EffectiveSettings) -> dict:
         "copilot_enabled": settings_obj.copilot_enabled,
         "max_copilot_per_day": settings_obj.max_copilot_per_day,
         "max_fast_copilot_per_day": settings_obj.max_fast_copilot_per_day,
+        "max_copilot_per_hour": settings_obj.max_copilot_per_hour,
         "max_copilot_per_digest": settings_obj.max_copilot_per_digest,
         "copilot_theme_ttl_minutes": settings_obj.copilot_theme_ttl_minutes,
         "digest_window_minutes": settings_obj.digest_window_minutes,
@@ -406,6 +411,7 @@ def _deserialize_effective_settings(payload: dict) -> EffectiveSettings | None:
             copilot_enabled=bool(payload.get("copilot_enabled", False)),
             max_copilot_per_day=int(payload.get("max_copilot_per_day", 0)),
             max_fast_copilot_per_day=int(payload.get("max_fast_copilot_per_day", 0)),
+            max_copilot_per_hour=int(payload.get("max_copilot_per_hour", defaults.DEFAULT_MAX_COPILOT_PER_HOUR)),
             max_copilot_per_digest=int(payload.get("max_copilot_per_digest", 1)),
             copilot_theme_ttl_minutes=int(payload.get("copilot_theme_ttl_minutes", 0)),
             digest_window_minutes=int(payload.get("digest_window_minutes", 0)),
