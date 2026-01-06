@@ -12,5 +12,3 @@ tenacity==9.0.0
 python-dotenv==1.0.1
 pytest==8.3.4
 ruff==0.6.9
-py-clob-client==0.34.1
-cryptography==42.0.8

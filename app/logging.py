@@ -6,11 +6,16 @@ from .settings import settings
 
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
+        try:
+            message = record.getMessage()
+        except TypeError:
+            # Guard against mismatched printf-style arguments; fallback to raw message.
+            message = str(record.msg)
         payload = {
             "ts": datetime.now(timezone.utc).isoformat(),
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": message,
         }
         if record.exc_info:
             payload["exc_info"] = self.formatException(record.exc_info)

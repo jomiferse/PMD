@@ -9,11 +9,6 @@ class Settings(BaseSettings):
     REDIS_URL: str
 
     POLYMARKET_BASE_URL: str
-    POLY_CLOB_HOST: str = "https://clob.polymarket.com"
-    POLY_CHAIN_ID: int = 137
-    POLY_SIGNATURE_TYPE: int = 0
-    POLY_FUNDER_ADDRESS: str | None = None
-    POLY_CREDENTIALS_ENCRYPTION_KEY: str | None = None
     POLY_PAGE_LIMIT: int = 100
     POLY_MAX_EVENTS: int | None = None
     POLY_MAX_PAGES: int | None = 100
@@ -33,6 +28,8 @@ class Settings(BaseSettings):
     FAST_SIGNALS_GLOBAL_ENABLED: bool = False
 
     TELEGRAM_BOT_TOKEN: str | None = None
+
+    EXECUTION_ENABLED: bool = False
 
     ADMIN_API_KEY: str | None = None
     OPENAI_API_KEY: str | None = None

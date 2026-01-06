@@ -42,9 +42,6 @@ def upgrade() -> None:
         sa.Column("fast_window_minutes", sa.Integer(), nullable=True),
         sa.Column("fast_max_themes_per_digest", sa.Integer(), nullable=True),
         sa.Column("fast_max_markets_per_theme", sa.Integer(), nullable=True),
-        sa.Column("risk_budget_usd_per_day", sa.Float(), nullable=True),
-        sa.Column("max_usd_per_trade", sa.Float(), nullable=True),
-        sa.Column("max_liquidity_fraction", sa.Float(), nullable=True),
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.UniqueConstraint("name", name="uq_plans_name"),
     )
@@ -83,9 +80,6 @@ def upgrade() -> None:
         sa.Column("max_markets_per_theme", sa.Integer(), nullable=True),
         sa.Column("p_min", sa.Float(), nullable=True),
         sa.Column("p_max", sa.Float(), nullable=True),
-        sa.Column("risk_budget_usd_per_day", sa.Float(), nullable=False, default=0.0),
-        sa.Column("max_usd_per_trade", sa.Float(), nullable=False, default=0.0),
-        sa.Column("max_liquidity_fraction", sa.Float(), nullable=False, default=0.01),
         sa.Column("fast_signals_enabled", sa.Boolean(), nullable=True),
         sa.Column("fast_window_minutes", sa.Integer(), nullable=True),
         sa.Column("fast_max_themes_per_digest", sa.Integer(), nullable=True),
@@ -94,11 +88,33 @@ def upgrade() -> None:
     )
 
     op.create_table(
+        "user_preferences",
+        sa.Column(
+            "user_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("users.user_id", ondelete="CASCADE"),
+            primary_key=True,
+        ),
+        sa.Column("risk_budget_usd_per_day", sa.Numeric(), nullable=False, server_default="0"),
+        sa.Column("max_usd_per_trade", sa.Numeric(), nullable=False, server_default="0"),
+        sa.Column("max_liquidity_fraction", sa.Numeric(), nullable=False, server_default="0.01"),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+            onupdate=sa.func.now(),
+        ),
+    )
+
+    op.create_table(
         "market_snapshots",
         sa.Column("id", sa.Integer(), primary_key=True),
         sa.Column("market_id", sa.String(length=128), nullable=False),
         sa.Column("title", sa.String(length=512), nullable=False),
         sa.Column("category", sa.String(length=128), nullable=False, default="unknown"),
+        sa.Column("slug", sa.Text(), nullable=True),
         sa.Column("market_p_yes", sa.Float(), nullable=False),
         sa.Column("primary_outcome_label", sa.String(length=64), nullable=True),
         sa.Column("is_yesno", sa.Boolean(), nullable=True),
@@ -204,6 +220,11 @@ def upgrade() -> None:
         ),
         sa.Column("delivered_at", sa.DateTime(), nullable=False),
         sa.Column("delivery_status", sa.String(length=16), nullable=False),
+        sa.Column(
+            "filter_reasons",
+            sa.JSON().with_variant(postgresql.JSONB, "postgresql"),
+            nullable=True,
+        ),
         sa.UniqueConstraint("alert_id", "user_id", name="uq_alert_delivery_alert_user"),
     )
     op.create_index(
@@ -361,6 +382,7 @@ def downgrade() -> None:
     op.drop_index("ix_market_snapshots_bucket", table_name="market_snapshots")
     op.drop_index("ix_market_snapshots_market_id", table_name="market_snapshots")
     op.drop_table("market_snapshots")
+    op.drop_table("user_preferences")
     op.drop_table("user_alert_preferences")
     op.drop_table("users")
     op.drop_table("plans")

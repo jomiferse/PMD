@@ -6,9 +6,10 @@ from uuid import UUID
 import redis
 from sqlalchemy.orm import Session
 
-from ..models import Plan, User, UserAlertPreference
+from ..models import Plan, User, UserAlertPreference, UserPreference
 from ..settings import settings
 from . import defaults
+from .plans import plan_alert_rules
 
 logger = logging.getLogger(__name__)
 redis_conn = redis.from_url(settings.REDIS_URL)
@@ -29,8 +30,14 @@ _CODE_DEFAULTS = {
     "min_abs_move": defaults.DEFAULT_MIN_ABS_MOVE,
     "p_min": defaults.DEFAULT_P_MIN,
     "p_max": defaults.DEFAULT_P_MAX,
+    "p_soft_min": defaults.DEFAULT_SOFT_P_MIN,
+    "p_soft_max": defaults.DEFAULT_SOFT_P_MAX,
+    "p_strict_min": defaults.DEFAULT_STRICT_P_MIN,
+    "p_strict_max": defaults.DEFAULT_STRICT_P_MAX,
     "allowed_strengths": set(defaults.DEFAULT_ALLOWED_STRENGTHS),
     "fast_signals_enabled": defaults.DEFAULT_FAST_SIGNALS_ENABLED,
+    "allow_info_alerts": defaults.DEFAULT_ALLOW_INFO_ALERTS,
+    "allow_fast_alerts": defaults.DEFAULT_ALLOW_FAST_ALERTS,
     "fast_window_minutes": defaults.DEFAULT_FAST_WINDOW_MINUTES,
     "fast_max_themes_per_digest": defaults.DEFAULT_FAST_MAX_THEMES_PER_DIGEST,
     "fast_max_markets_per_theme": defaults.DEFAULT_FAST_MAX_MARKETS_PER_THEME,
@@ -62,8 +69,14 @@ class EffectiveSettings:
     min_abs_move: float
     p_min: float
     p_max: float
+    p_soft_min: float
+    p_soft_max: float
+    p_strict_min: float
+    p_strict_max: float
     allowed_strengths: set[str]
     fast_signals_enabled: bool
+    allow_info_alerts: bool
+    allow_fast_alerts: bool
     fast_window_minutes: int
     fast_max_themes_per_digest: int
     fast_max_markets_per_theme: int
@@ -84,12 +97,13 @@ def get_effective_settings(db: Session, user_id: UUID) -> EffectiveSettings:
     )
     if not user:
         raise ValueError(f"user not found: {user_id}")
-    pref = (
+    alert_pref = (
         db.query(UserAlertPreference)
         .filter(UserAlertPreference.user_id == user_id)
         .one_or_none()
     )
-    effective = resolve_effective_settings(user, pref)
+    risk_pref = _get_or_create_user_preferences(db, user.user_id)
+    effective = resolve_effective_settings(user, alert_pref, risk_pref)
     _store_cached(user.user_id, effective)
     return effective
 
@@ -97,6 +111,7 @@ def get_effective_settings(db: Session, user_id: UUID) -> EffectiveSettings:
 def get_effective_settings_for_user(
     user: User,
     pref: UserAlertPreference | None = None,
+    risk_pref: UserPreference | None = None,
     db: Session | None = None,
 ) -> EffectiveSettings:
     cached = _load_cached(user.user_id)
@@ -109,7 +124,9 @@ def get_effective_settings_for_user(
             .filter(UserAlertPreference.user_id == user.user_id)
             .one_or_none()
         )
-    effective = resolve_effective_settings(user, pref)
+    if risk_pref is None and db is not None:
+        risk_pref = _get_or_create_user_preferences(db, user.user_id)
+    effective = resolve_effective_settings(user, pref, risk_pref)
     _store_cached(user.user_id, effective)
     return effective
 
@@ -117,9 +134,15 @@ def get_effective_settings_for_user(
 def resolve_effective_settings(
     user: User,
     pref: UserAlertPreference | None = None,
+    risk_pref: UserPreference | None = None,
 ) -> EffectiveSettings:
     effective = dict(_CODE_DEFAULTS)
     plan = getattr(user, "plan", None)
+    rules = plan_alert_rules(getattr(plan, "name", None))
+    effective["allow_info_alerts"] = rules.allow_info_alerts
+    effective["allow_fast_alerts"] = rules.allow_fast_alerts
+    effective["p_soft_min"], effective["p_soft_max"] = rules.soft_band
+    effective["p_strict_min"], effective["p_strict_max"] = rules.strict_band
     plan_copilot_enabled = True
     if plan is not None and getattr(plan, "copilot_enabled", None) is not None:
         plan_copilot_enabled = bool(plan.copilot_enabled)
@@ -127,7 +150,9 @@ def resolve_effective_settings(
         _apply_plan_overrides(effective, plan)
 
     if pref is not None:
-        _apply_user_preferences(effective, pref)
+        _apply_user_alert_preferences(effective, pref)
+    if risk_pref is not None:
+        _apply_user_risk_preferences(effective, risk_pref)
 
     overrides = _load_overrides(user)
     if overrides:
@@ -148,8 +173,14 @@ def resolve_effective_settings(
         min_abs_move=float(effective["min_abs_move"]),
         p_min=float(effective["p_min"]),
         p_max=float(effective["p_max"]),
+        p_soft_min=float(effective["p_soft_min"]),
+        p_soft_max=float(effective["p_soft_max"]),
+        p_strict_min=float(effective["p_strict_min"]),
+        p_strict_max=float(effective["p_strict_max"]),
         allowed_strengths=set(effective["allowed_strengths"]),
         fast_signals_enabled=bool(effective["fast_signals_enabled"]),
+        allow_info_alerts=bool(effective["allow_info_alerts"]),
+        allow_fast_alerts=bool(effective["allow_fast_alerts"]),
         fast_window_minutes=int(effective["fast_window_minutes"]),
         fast_max_themes_per_digest=int(effective["fast_max_themes_per_digest"]),
         fast_max_markets_per_theme=int(effective["fast_max_markets_per_theme"]),
@@ -180,7 +211,7 @@ def _apply_plan_overrides(effective: dict, plan: Plan) -> None:
         effective[key] = value
 
 
-def _apply_user_preferences(effective: dict, pref: UserAlertPreference) -> None:
+def _apply_user_alert_preferences(effective: dict, pref: UserAlertPreference) -> None:
     if pref.min_liquidity is not None:
         effective["min_liquidity"] = pref.min_liquidity
     if pref.min_volume_24h is not None:
@@ -212,12 +243,11 @@ def _apply_user_preferences(effective: dict, pref: UserAlertPreference) -> None:
     if pref.fast_signals_enabled is not None:
         effective["fast_signals_enabled"] = bool(pref.fast_signals_enabled)
 
-    if pref.risk_budget_usd_per_day != _RISK_DEFAULTS["risk_budget_usd_per_day"]:
-        effective["risk_budget_usd_per_day"] = pref.risk_budget_usd_per_day
-    if pref.max_usd_per_trade != _RISK_DEFAULTS["max_usd_per_trade"]:
-        effective["max_usd_per_trade"] = pref.max_usd_per_trade
-    if pref.max_liquidity_fraction != _RISK_DEFAULTS["max_liquidity_fraction"]:
-        effective["max_liquidity_fraction"] = pref.max_liquidity_fraction
+
+def _apply_user_risk_preferences(effective: dict, pref: UserPreference) -> None:
+    effective["risk_budget_usd_per_day"] = float(pref.risk_budget_usd_per_day or 0.0)
+    effective["max_usd_per_trade"] = float(pref.max_usd_per_trade or 0.0)
+    effective["max_liquidity_fraction"] = float(pref.max_liquidity_fraction or 0.0)
 
 
 def _load_overrides(user: User) -> dict | None:
@@ -248,6 +278,12 @@ def _apply_overrides(effective: dict, overrides: dict) -> None:
                 effective[key] = parsed
             continue
         if key in {"fast_signals_enabled"}:
+            parsed = _coerce_bool(raw_value)
+            if parsed is None:
+                continue
+            effective[key] = parsed
+            continue
+        if key in {"allow_info_alerts", "allow_fast_alerts"}:
             parsed = _coerce_bool(raw_value)
             if parsed is None:
                 continue
@@ -311,7 +347,17 @@ def _parse_strengths(value) -> set[str]:
         parts = {str(part).strip().upper() for part in value if str(part).strip()}
         return {part for part in parts if part}
     if isinstance(value, str):
-        parts = {part.strip().upper() for part in value.split(",") if part.strip()}
+        raw = value.strip()
+        try:
+            decoded = json.loads(raw)
+            if isinstance(decoded, (list, tuple, set)):
+                return {str(part).strip().upper() for part in decoded if str(part).strip()}
+            if isinstance(decoded, str):
+                raw = decoded
+        except json.JSONDecodeError:
+            pass
+
+        parts = {part.strip().upper() for part in raw.split(",") if part.strip()}
         return parts
     return set()
 
@@ -363,8 +409,14 @@ def _serialize_effective_settings(settings_obj: EffectiveSettings) -> dict:
         "min_abs_move": settings_obj.min_abs_move,
         "p_min": settings_obj.p_min,
         "p_max": settings_obj.p_max,
+        "p_soft_min": settings_obj.p_soft_min,
+        "p_soft_max": settings_obj.p_soft_max,
+        "p_strict_min": settings_obj.p_strict_min,
+        "p_strict_max": settings_obj.p_strict_max,
         "allowed_strengths": sorted(settings_obj.allowed_strengths),
         "fast_signals_enabled": settings_obj.fast_signals_enabled,
+        "allow_info_alerts": settings_obj.allow_info_alerts,
+        "allow_fast_alerts": settings_obj.allow_fast_alerts,
         "fast_window_minutes": settings_obj.fast_window_minutes,
         "fast_max_themes_per_digest": settings_obj.fast_max_themes_per_digest,
         "fast_max_markets_per_theme": settings_obj.fast_max_markets_per_theme,
@@ -391,8 +443,14 @@ def _deserialize_effective_settings(payload: dict) -> EffectiveSettings | None:
             min_abs_move=float(payload.get("min_abs_move", 0.0)),
             p_min=float(payload.get("p_min", 0.0)),
             p_max=float(payload.get("p_max", 0.0)),
+            p_soft_min=float(payload.get("p_soft_min", defaults.DEFAULT_SOFT_P_MIN)),
+            p_soft_max=float(payload.get("p_soft_max", defaults.DEFAULT_SOFT_P_MAX)),
+            p_strict_min=float(payload.get("p_strict_min", defaults.DEFAULT_STRICT_P_MIN)),
+            p_strict_max=float(payload.get("p_strict_max", defaults.DEFAULT_STRICT_P_MAX)),
             allowed_strengths=set(payload.get("allowed_strengths", [])),
             fast_signals_enabled=bool(payload.get("fast_signals_enabled", False)),
+            allow_info_alerts=bool(payload.get("allow_info_alerts", defaults.DEFAULT_ALLOW_INFO_ALERTS)),
+            allow_fast_alerts=bool(payload.get("allow_fast_alerts", defaults.DEFAULT_ALLOW_FAST_ALERTS)),
             fast_window_minutes=int(payload.get("fast_window_minutes", 0)),
             fast_max_themes_per_digest=int(payload.get("fast_max_themes_per_digest", 0)),
             fast_max_markets_per_theme=int(payload.get("fast_max_markets_per_theme", 0)),
@@ -401,4 +459,23 @@ def _deserialize_effective_settings(payload: dict) -> EffectiveSettings | None:
             max_liquidity_fraction=float(payload.get("max_liquidity_fraction", 0.0)),
         )
     except Exception:
+        return None
+
+
+def _get_or_create_user_preferences(db: Session, user_id: UUID) -> UserPreference | None:
+    try:
+        pref = (
+            db.query(UserPreference)
+            .filter(UserPreference.user_id == user_id)
+            .one_or_none()
+        )
+        if pref:
+            return pref
+        pref = UserPreference(user_id=user_id)
+        db.add(pref)
+        db.commit()
+        db.refresh(pref)
+        return pref
+    except Exception:
+        logger.exception("user_preferences_load_failed user_id=%s", user_id)
         return None

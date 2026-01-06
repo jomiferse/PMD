@@ -35,6 +35,7 @@ def db_session():
 class FakeRedis:
     def __init__(self):
         self.store = {}
+        self.expirations = {}
 
     def get(self, key):
         return self.store.get(key)
@@ -43,9 +44,24 @@ class FakeRedis:
         if nx and key in self.store:
             return None
         self.store[key] = value
+        if ex is not None:
+            self.expirations[key] = ex
         return True
 
     def expire(self, key, ttl):
+        if key not in self.store:
+            return False
+        self.expirations[key] = ttl
+        return True
+
+    def ttl(self, key):
+        if key not in self.store:
+            return -2
+        return self.expirations.get(key, -1)
+
+    def delete(self, key):
+        self.store.pop(key, None)
+        self.expirations.pop(key, None)
         return True
 
 def _make_alert(**overrides):
@@ -87,6 +103,8 @@ def _make_config(user_id):
         digest_window_minutes=60,
         max_alerts_per_digest=10,
         ai_copilot_enabled=True,
+        copilot_user_enabled=True,
+        copilot_plan_enabled=True,
         risk_budget_usd_per_day=100.0,
         max_usd_per_trade=20.0,
         max_liquidity_fraction=0.01,
@@ -96,6 +114,12 @@ def _make_config(user_id):
         fast_max_markets_per_theme=defaults.DEFAULT_FAST_MAX_MARKETS_PER_THEME,
         p_min=defaults.DEFAULT_P_MIN,
         p_max=defaults.DEFAULT_P_MAX,
+        p_soft_min=defaults.DEFAULT_SOFT_P_MIN,
+        p_soft_max=defaults.DEFAULT_SOFT_P_MAX,
+        p_strict_min=defaults.DEFAULT_STRICT_P_MIN,
+        p_strict_max=defaults.DEFAULT_STRICT_P_MAX,
+        allow_info_alerts=True,
+        allow_fast_alerts=True,
         plan_name="default",
         max_copilot_per_day=5,
         max_copilot_per_digest=1,
@@ -247,6 +271,37 @@ def test_copilot_skips_non_follow(db_session, monkeypatch):
     assert not enqueued
 
 
+def test_fast_actionable_skips_probability_band_for_copilot(db_session, monkeypatch):
+    _patch_digest_helpers(monkeypatch)
+    user_id = uuid4()
+    alert = _make_alert(
+        market_id="market-fast",
+        market_p_yes=0.95,
+        prev_market_p_yes=0.4,
+        old_price=0.4,
+        new_price=0.95,
+        delta_pct=0.55,
+        liquidity=15000.0,
+        volume_24h=20000.0,
+    )
+    db_session.add(alert)
+    db_session.commit()
+
+    fake_redis = FakeRedis()
+    monkeypatch.setattr("app.core.alerts.redis_conn", fake_redis)
+    enqueued: list = []
+    monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: enqueued.append(args))
+
+    evaluations = _enqueue_ai_recommendations(
+        db_session,
+        _make_config(user_id),
+        [alert],
+        classifier=lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
+    )
+    assert evaluations and evaluations[0].reasons == []
+    assert len(enqueued) == 1
+
+
 def test_copilot_dedupe_by_theme_key(db_session, monkeypatch):
     user_id = uuid4()
     alert = _make_alert(
@@ -265,7 +320,11 @@ def test_copilot_dedupe_by_theme_key(db_session, monkeypatch):
     )
     monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: enqueued.append(args))
 
+    theme_key = extract_theme(alert.title, category=alert.category, slug=alert.market_id).theme_key
+    dedupe_key = f"copilot:theme:{user_id}:{theme_key}"
+
     _enqueue_ai_recommendations(db_session, _make_config(user_id), [alert])
+    fake_redis.set(dedupe_key, "1", ex=3600)
     _enqueue_ai_recommendations(db_session, _make_config(user_id), [alert])
     assert len(enqueued) == 1
 
@@ -306,7 +365,7 @@ def test_copilot_eval_includes_dedupe_reason(db_session, monkeypatch):
 
     fake_redis = FakeRedis()
     theme_key = extract_theme(alert.title, category=alert.category, slug=alert.market_id).theme_key
-    fake_redis.store[f"copilot:sent:{user_id}:{theme_key}"] = "1"
+    fake_redis.set(f"copilot:theme:{user_id}:{theme_key}", "1", ex=300)
     monkeypatch.setattr("app.core.alerts.redis_conn", fake_redis)
     monkeypatch.setattr(
         "app.core.alerts.classify_alert_with_snapshots",

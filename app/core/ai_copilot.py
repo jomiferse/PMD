@@ -1,6 +1,7 @@
 import html
 import json
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -22,9 +23,9 @@ from ..settings import settings
 from . import defaults
 from .user_settings import get_effective_user_settings
 from ..trading.sizing import DraftUnavailable, compute_draft_size
-from ..trading.polymarket_execution import execute_confirmed_order
 from ..llm.client import get_trade_recommendation
 from .alert_classification import classify_alert_with_snapshots
+from .market_links import attach_market_slugs, market_url
 from .telegram import send_telegram_message, answer_callback_query, edit_message_reply_markup
 
 logger = logging.getLogger(__name__)
@@ -34,12 +35,17 @@ REC_STATUS_PROPOSED = "PROPOSED"
 REC_STATUS_CONFIRMED = "CONFIRMED"
 REC_STATUS_SKIPPED = "SKIPPED"
 REC_STATUS_EXPIRED = "EXPIRED"
+READ_ONLY_DISCLAIMER = "<i>Read-only analytics • Manual execution only • Not financial advice</i>"
 
 RISK_SPENT_KEY = "ai:risk:spent:{user_id}:{date}"
 CALLBACK_SEEN_KEY = "ai:telegram:callback:{callback_id}"
 CALLBACK_TTL_SECONDS = 60 * 60 * 24
-COPILOT_THEME_DEDUPE_KEY = "copilot:sent:{user_id}:{theme_key}"
+COPILOT_THEME_DEDUPE_KEY = "copilot:theme:{user_id}:{theme_key}"
 COPILOT_DAILY_COUNT_KEY = "copilot:count:{user_id}:{date}"
+COPILOT_RUN_KEY = "copilot:run:{run_id}"
+COPILOT_LAST_STATUS_KEY = "copilot:last_status:{user_id}"
+COPILOT_LAST_STATUS_TTL_SECONDS = 60 * 60 * 24
+COPILOT_RUN_TTL_SECONDS = 60 * 60 * 24
 
 
 @dataclass(frozen=True)
@@ -50,10 +56,19 @@ class DraftOrder:
     notional_usd: float
 
 
+@dataclass(frozen=True)
+class CopilotThemeClaim:
+    claimed: bool
+    key: str
+    ttl_seconds: int
+    ttl_remaining: int | None
+
+
 def create_ai_recommendation(
     db: Session,
     user: User,
     alert: Alert,
+    run_id: str | None = None,
 ) -> AiRecommendation | None:
     now_ts = datetime.now(timezone.utc)
     theme_key = _theme_key_for_alert(alert)
@@ -83,59 +98,71 @@ def create_ai_recommendation(
         else:
             return None
 
-    if not _claim_copilot_theme(user.user_id, theme_key, effective.copilot_theme_ttl_minutes):
+    claim = _claim_copilot_theme(user.user_id, theme_key, effective.copilot_theme_ttl_minutes)
+    if not claim.claimed:
         logger.info(
-            "ai_rec_skipped dedupe user_id=%s market_id=%s theme_key=%s",
-            user.user_id,
-            alert.market_id,
+            "ai_rec_skipped reason=DEDUPE theme_key=%s ttl_remaining=%s user_id=%s dedupe_key=%s "
+            "ttl_configured=%s scope=theme",
             theme_key,
+            claim.ttl_remaining,
+            user.user_id,
+            claim.key,
+            claim.ttl_seconds,
         )
         return None
 
-    classification = classify_alert_with_snapshots(db, alert)
-    evidence = _build_evidence(db, alert)
-    llm_context = _build_llm_context(alert, classification, user, effective, evidence)
-    llm_result = get_trade_recommendation(llm_context)
+    try:
+        classification = classify_alert_with_snapshots(db, alert)
+        evidence = _build_evidence(db, alert)
+        llm_context = _build_llm_context(alert, classification, user, effective, evidence)
+        _increment_copilot_run_counter(run_id, "llm_calls_attempted", 1)
+        llm_result = get_trade_recommendation(llm_context)
+        _increment_copilot_run_counter(run_id, "llm_calls_succeeded", 1)
 
-    draft = None
-    if llm_result["recommendation"] == "BUY":
-        draft = _build_draft(effective, alert, user, theme_key)
+        draft = None
+        if llm_result["recommendation"] == "BUY":
+            draft = _build_draft(effective, alert, user, theme_key)
 
-    recommendation = AiRecommendation(
-        user_id=user.user_id,
-        alert_id=alert.id,
-        recommendation=llm_result["recommendation"],
-        confidence=llm_result["confidence"],
-        rationale=llm_result["rationale"],
-        risks=llm_result["risks"],
-        draft_side=draft.side if isinstance(draft, DraftOrder) else None,
-        draft_price=draft.price if isinstance(draft, DraftOrder) else None,
-        draft_size=draft.size if isinstance(draft, DraftOrder) else None,
-        draft_notional_usd=draft.notional_usd if isinstance(draft, DraftOrder) else None,
-        status=REC_STATUS_PROPOSED,
-        expires_at=now_ts + timedelta(minutes=defaults.AI_RECOMMENDATION_EXPIRES_MINUTES),
-    )
-    db.add(recommendation)
-    db.commit()
-    db.refresh(recommendation)
+        recommendation = AiRecommendation(
+            user_id=user.user_id,
+            alert_id=alert.id,
+            recommendation=llm_result["recommendation"],
+            confidence=llm_result["confidence"],
+            rationale=llm_result["rationale"],
+            risks=llm_result["risks"],
+            draft_side=draft.side if isinstance(draft, DraftOrder) else None,
+            draft_price=draft.price if isinstance(draft, DraftOrder) else None,
+            draft_size=draft.size if isinstance(draft, DraftOrder) else None,
+            draft_notional_usd=draft.notional_usd if isinstance(draft, DraftOrder) else None,
+            status=REC_STATUS_PROPOSED,
+            expires_at=now_ts + timedelta(minutes=defaults.AI_RECOMMENDATION_EXPIRES_MINUTES),
+        )
+        db.add(recommendation)
+        db.commit()
+        db.refresh(recommendation)
 
-    record_ai_event(db, recommendation, "proposed", "ai_copilot_recommendation_created")
-    logger.info(
-        "ai_rec_created user_id=%s alert_id=%s recommendation=%s confidence=%s",
-        user.user_id,
-        alert.id,
-        recommendation.recommendation,
-        recommendation.confidence,
-    )
-    if recommendation.recommendation in {"WAIT", "SKIP"}:
+        record_ai_event(db, recommendation, "proposed", "ai_copilot_recommendation_created")
         logger.info(
-            "ai_rec_hold_reason user_id=%s alert_id=%s rationale=%s",
+            "ai_rec_created user_id=%s alert_id=%s recommendation=%s confidence=%s",
             user.user_id,
             alert.id,
-            recommendation.rationale[:200],
+            recommendation.recommendation,
+            recommendation.confidence,
         )
-    _send_recommendation_message(db, user, alert, recommendation, evidence)
-    return recommendation
+        if recommendation.recommendation in {"WAIT", "SKIP"}:
+            logger.info(
+                "ai_rec_hold_reason user_id=%s alert_id=%s rationale=%s",
+                user.user_id,
+                alert.id,
+                recommendation.rationale[:200],
+            )
+        sent = _send_recommendation_message(db, user, alert, recommendation, evidence, run_id=run_id)
+        if not sent:
+            _release_copilot_theme(claim.key, defaults.COPILOT_DEDUPE_FAILURE_TTL_SECONDS)
+        return recommendation
+    except Exception:
+        _release_copilot_theme(claim.key, defaults.COPILOT_DEDUPE_FAILURE_TTL_SECONDS)
+        raise
 
 
 def handle_telegram_callback(db: Session, payload: dict[str, Any]) -> dict[str, Any]:
@@ -321,61 +348,228 @@ def _increment_copilot_daily_count(user_id: Any) -> None:
         logger.exception("copilot_daily_count_increment_failed user_id=%s", user_id)
 
 
+def init_copilot_run(
+    run_id: str,
+    summary: dict[str, object],
+    run_started_at: float | None,
+    expected_jobs: int,
+) -> None:
+    if not run_id:
+        return
+    key = COPILOT_RUN_KEY.format(run_id=run_id)
+    started_at = run_started_at if run_started_at is not None else time.time()
+    try:
+        redis_conn.hsetnx(key, "base_summary", json.dumps(summary, ensure_ascii=True))
+        redis_conn.hsetnx(key, "expected_jobs", int(expected_jobs))
+        redis_conn.hsetnx(key, "jobs_completed", 0)
+        redis_conn.hsetnx(key, "llm_calls_attempted", 0)
+        redis_conn.hsetnx(key, "llm_calls_succeeded", 0)
+        redis_conn.hsetnx(key, "telegram_sends_attempted", 0)
+        redis_conn.hsetnx(key, "telegram_sends_succeeded", 0)
+        redis_conn.hsetnx(key, "started_at", float(started_at))
+        redis_conn.hsetnx(key, "logged", 0)
+        redis_conn.expire(key, COPILOT_RUN_TTL_SECONDS)
+        _maybe_log_copilot_run(run_id)
+    except Exception:
+        logger.exception("copilot_run_init_failed run_id=%s", run_id)
+
+
+def log_copilot_run_summary(summary: dict[str, object]) -> None:
+    try:
+        logger.info("copilot_run_summary %s", json.dumps(summary, ensure_ascii=True))
+    except Exception:
+        logger.exception("copilot_run_summary_log_failed")
+
+
+def store_copilot_last_status(summary: dict[str, object]) -> None:
+    user_id = summary.get("user_id")
+    if not user_id:
+        return
+    reason_counts = summary.get("skipped_by_reason_counts") or {}
+    top_reasons = []
+    if isinstance(reason_counts, dict):
+        ranked = sorted(
+            ((key, reason_counts.get(key, 0)) for key in reason_counts),
+            key=lambda item: (-int(item[1] or 0), str(item[0])),
+        )
+        top_reasons = [reason for reason, _count in ranked[:3]]
+    payload = {
+        "user_id": user_id,
+        "run_id": summary.get("run_id"),
+        "summary": summary,
+        "top_reasons": top_reasons,
+        "created_at": summary.get("created_at"),
+    }
+    try:
+        redis_conn.set(
+            COPILOT_LAST_STATUS_KEY.format(user_id=user_id),
+            json.dumps(payload, ensure_ascii=True),
+            ex=COPILOT_LAST_STATUS_TTL_SECONDS,
+        )
+    except Exception:
+        logger.exception("copilot_last_status_store_failed user_id=%s", user_id)
+
+
+def _increment_copilot_run_counter(run_id: str | None, field: str, amount: int) -> None:
+    if not run_id:
+        return
+    key = COPILOT_RUN_KEY.format(run_id=run_id)
+    try:
+        redis_conn.hincrby(key, field, amount)
+    except Exception:
+        logger.exception("copilot_run_counter_failed run_id=%s field=%s", run_id, field)
+
+
+def _complete_copilot_run(run_id: str | None) -> None:
+    if not run_id:
+        return
+    key = COPILOT_RUN_KEY.format(run_id=run_id)
+    try:
+        redis_conn.hincrby(key, "jobs_completed", 1)
+        _maybe_log_copilot_run(run_id)
+    except Exception:
+        logger.exception("copilot_run_complete_failed run_id=%s", run_id)
+
+
+def _maybe_log_copilot_run(run_id: str | None) -> None:
+    if not run_id:
+        return
+    key = COPILOT_RUN_KEY.format(run_id=run_id)
+    try:
+        expected_raw = redis_conn.hget(key, "expected_jobs")
+        if isinstance(expected_raw, (bytes, bytearray)):
+            expected_raw = expected_raw.decode()
+        expected = int(expected_raw) if expected_raw is not None else 0
+        completed_raw = redis_conn.hget(key, "jobs_completed")
+        if isinstance(completed_raw, (bytes, bytearray)):
+            completed_raw = completed_raw.decode()
+        completed = int(completed_raw) if completed_raw is not None else 0
+        if completed < expected:
+            return
+        logged_raw = redis_conn.hget(key, "logged")
+        if str(logged_raw) in {"1", "b'1'"}:
+            return
+        if not redis_conn.hsetnx(key, "logged", 1):
+            return
+        base_raw = redis_conn.hget(key, "base_summary")
+        if not base_raw:
+            return
+        if isinstance(base_raw, (bytes, bytearray)):
+            base_raw = base_raw.decode()
+        summary = json.loads(base_raw)
+
+        def _get_int(field_name: str) -> int:
+            raw = redis_conn.hget(key, field_name)
+            if raw is None:
+                return 0
+            if isinstance(raw, (bytes, bytearray)):
+                raw = raw.decode()
+            try:
+                return int(raw)
+            except ValueError:
+                return 0
+
+        started_raw = redis_conn.hget(key, "started_at")
+        if isinstance(started_raw, (bytes, bytearray)):
+            started_raw = started_raw.decode()
+        try:
+            started_at = float(started_raw) if started_raw is not None else time.time()
+        except ValueError:
+            started_at = time.time()
+        summary.update(
+            {
+                "llm_calls_attempted": _get_int("llm_calls_attempted"),
+                "llm_calls_succeeded": _get_int("llm_calls_succeeded"),
+                "telegram_sends_attempted": _get_int("telegram_sends_attempted"),
+                "telegram_sends_succeeded": _get_int("telegram_sends_succeeded"),
+                "duration_ms": int((time.time() - started_at) * 1000),
+            }
+        )
+        log_copilot_run_summary(summary)
+        if summary.get("telegram_sends_succeeded") == 0:
+            store_copilot_last_status(summary)
+    except Exception:
+        logger.exception("copilot_run_maybe_log_failed run_id=%s", run_id)
+
+
 def _send_recommendation_message(
     db: Session,
     user: User,
     alert: Alert,
     rec: AiRecommendation,
     evidence: list[str],
-) -> None:
+    run_id: str | None = None,
+) -> bool:
     if not user.telegram_chat_id:
-        return
+        return False
     draft_unavailable = None
     if rec.recommendation == "BUY" and not _draft_complete(rec):
         effective = get_effective_user_settings(user, db=db)
         draft_unavailable = _draft_unavailable_reasons(alert, effective, rec.user_id)
+    attach_market_slugs(db, [alert])
     text, markup = _format_ai_message(alert, rec, evidence, draft_unavailable)
+    _increment_copilot_run_counter(run_id, "telegram_sends_attempted", 1)
     response = send_telegram_message(user.telegram_chat_id, text, reply_markup=markup)
+    success = bool(response and response.get("ok"))
     message_id = None
-    if response and response.get("ok"):
+    if success:
         message_id = response.get("result", {}).get("message_id")
         _increment_copilot_daily_count(rec.user_id)
-    if message_id:
-        rec.telegram_message_id = str(message_id)
-        db.commit()
+        _increment_copilot_run_counter(run_id, "telegram_sends_succeeded", 1)
+        if message_id:
+            rec.telegram_message_id = str(message_id)
+            db.commit()
+    else:
+        logger.warning(
+            "copilot_telegram_send_failed user_id=%s alert_id=%s rec_id=%s",
+            user.user_id,
+            alert.id,
+            rec.id,
+        )
+    return success
 
 
 def _send_confirm_payload(db: Session, chat_id: str, rec: AiRecommendation) -> None:
+    if settings.EXECUTION_ENABLED:
+        logger.error("execution_enabled_guard_triggered rec_id=%s user_id=%s", rec.id, rec.user_id)
+        send_telegram_message(chat_id, "Execution is disabled in this environment.")
+        return
     alert = db.query(Alert).filter(Alert.id == rec.alert_id).one_or_none()
-    if not alert or not _draft_complete(rec):
-        user = db.query(User).filter(User.user_id == rec.user_id).one_or_none()
-        effective = get_effective_user_settings(user, db=db) if user else None
-        missing = _draft_unavailable_reasons(alert, effective, rec.user_id)
-        missing_text = ", ".join(missing) if missing else "unknown"
-        send_telegram_message(chat_id, f"Order not submitted. Missing inputs: {missing_text}.")
-        return
+    user = db.query(User).filter(User.user_id == rec.user_id).one_or_none()
+    effective = get_effective_user_settings(user, db=db) if user else None
+    missing = _draft_unavailable_reasons(alert, effective, rec.user_id) if alert else ["missing alert"]
 
-    outcome_label = _format_side_label(alert)
-    result = execute_confirmed_order(
-        db,
-        rec.user_id,
-        market_id=alert.market_id,
-        outcome_label=outcome_label,
-        price=rec.draft_price or 0.0,
-        size=rec.draft_size or 0.0,
-    )
-    if not result.ok:
-        send_telegram_message(chat_id, f"Order failed: {result.reason}.")
-        return
+    lines = ["<b>Confirmed (manual only).</b>"]
+    if alert:
+        attach_market_slugs(db, [alert])
+        title = html.escape(alert.title[:160])
+        slug = getattr(alert, "market_slug", None)
+        slug_text = html.escape(slug) if slug else html.escape(alert.market_id)
+        lines.extend([title, f"Slug: {slug_text}"])
 
-    payload_text = html.escape(json.dumps(result.order_payload, indent=2)) if result.order_payload else ""
-    response_text = html.escape(json.dumps(result.response, indent=2)) if result.response else ""
-    text = "Order submitted."
-    if payload_text:
-        text += f"\nOrder payload:\n<pre>{payload_text}</pre>"
-    if response_text:
-        text += f"\nOrder response:\n<pre>{response_text}</pre>"
-    send_telegram_message(chat_id, text)
+        side_label = _format_side_label(alert)
+        amount_parts = []
+        if rec.draft_size and rec.draft_size > 0:
+            amount_parts.append(f"{rec.draft_size:.2f} shares")
+        if rec.draft_price and rec.draft_price > 0:
+            amount_parts.append(f"@ {rec.draft_price:.4f}")
+        if rec.draft_notional_usd and rec.draft_notional_usd > 0:
+            amount_parts.append(f"(~${rec.draft_notional_usd:.2f})")
+        amount_text = " ".join(amount_parts) if amount_parts else "n/a"
+        lines.extend(
+            [
+                f"Suggested side: {side_label}",
+                f"Suggested amount: {amount_text}",
+                "",
+                _format_market_link(alert.market_id, slug),
+            ]
+        )
+    if missing and missing != ["missing alert"]:
+        missing_text = ", ".join(missing)
+        lines.extend(["", f"Draft inputs missing: {html.escape(missing_text)}"])
+
+    lines.extend(["", READ_ONLY_DISCLAIMER])
+    send_telegram_message(chat_id, "\n".join(lines))
 
 
 def _format_ai_message(
@@ -432,9 +626,10 @@ def _format_ai_message(
     lines.extend(
         [
             "",
-            _format_market_link(alert.market_id),
+            _format_market_link(alert.market_id, getattr(alert, "market_slug", None)),
         ]
     )
+    lines.extend(["", READ_ONLY_DISCLAIMER])
     keyboard: list[list[dict[str, Any]]] = []
     if rec.recommendation == "BUY":
         keyboard.append(
@@ -699,29 +894,14 @@ def _format_liquidity(alert: Alert) -> str:
     return f"Liquidity: ${alert.liquidity:,.0f} | Volume: ${alert.volume_24h:,.0f}"
 
 
-def _format_market_link(market_id: str) -> str:
-    return f"https://polymarket.com/market/{market_id}"
+def _format_market_link(market_id: str, slug: str | None = None) -> str:
+    return market_url(market_id, slug)
 
 
 def _signed_price_delta(alert: Alert) -> float:
     if alert.old_price is not None and alert.new_price is not None:
         return alert.new_price - alert.old_price
     return alert.move or 0.0
-
-
-def _format_manual_payload(alert: Alert | None, rec: AiRecommendation) -> dict[str, Any]:
-    market_id = alert.market_id if alert else None
-    if not _draft_complete(rec):
-        return {}
-    return {
-        "market_id": market_id,
-        "token_id": market_id,
-        "side": rec.draft_side,
-        "price": rec.draft_price,
-        "size": rec.draft_size,
-        "notional_usd": rec.draft_notional_usd,
-        "note": "Execution payload.",
-    }
 
 
 def _draft_complete(rec: AiRecommendation) -> bool:
@@ -790,15 +970,38 @@ def _callback_already_processed(callback_id: str) -> bool:
         return False
 
 
-def _claim_copilot_theme(user_id: Any, theme_key: str, ttl_minutes: int) -> bool:
-    ttl_minutes = max(int(ttl_minutes), 1)
+def _claim_copilot_theme(user_id: Any, theme_key: str, ttl_minutes: int) -> CopilotThemeClaim:
+    ttl_seconds = max(int(ttl_minutes * 60), 60)
     key = COPILOT_THEME_DEDUPE_KEY.format(user_id=user_id, theme_key=theme_key)
+    ttl_remaining: int | None = None
     try:
-        marked = redis_conn.set(key, "1", nx=True, ex=ttl_minutes * 60)
-        return bool(marked)
+        marked = redis_conn.set(key, "1", nx=True, ex=ttl_seconds)
+        if marked:
+            return CopilotThemeClaim(True, key, ttl_seconds, ttl_seconds)
+        ttl_remaining = redis_conn.ttl(key)
+        if ttl_remaining is not None and ttl_remaining < 0:
+            ttl_remaining = None
+        if ttl_remaining is None:
+            try:
+                redis_conn.expire(key, ttl_seconds)
+            except Exception:
+                logger.exception("copilot_theme_dedupe_expire_reset_failed user_id=%s theme_key=%s", user_id, theme_key)
     except Exception:
         logger.exception("copilot_theme_dedupe_failed user_id=%s theme_key=%s", user_id, theme_key)
-        return True
+        return CopilotThemeClaim(True, key, ttl_seconds, None)
+    return CopilotThemeClaim(False, key, ttl_seconds, ttl_remaining)
+
+
+def _release_copilot_theme(key: str, retry_ttl_seconds: int | None = None) -> None:
+    if not key:
+        return
+    try:
+        if retry_ttl_seconds:
+            redis_conn.expire(key, max(int(retry_ttl_seconds), 1))
+        else:
+            redis_conn.delete(key)
+    except Exception:
+        logger.exception("copilot_theme_dedupe_release_failed key=%s retry_ttl=%s", key, retry_ttl_seconds)
 
 
 def _clear_message_actions(chat_id: str | None, message_id: Any) -> None:

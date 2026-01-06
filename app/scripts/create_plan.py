@@ -38,9 +38,6 @@ def upsert_plan(args: argparse.Namespace) -> None:
             "fast_window_minutes",
             "fast_max_themes_per_digest",
             "fast_max_markets_per_theme",
-            "risk_budget_usd_per_day",
-            "max_usd_per_trade",
-            "max_liquidity_fraction",
         ):
             value = getattr(args, field)
             if value is None:
@@ -81,9 +78,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fast-window-minutes", type=int)
     parser.add_argument("--fast-max-themes-per-digest", type=int)
     parser.add_argument("--fast-max-markets-per-theme", type=int)
-    parser.add_argument("--risk-budget-usd-per-day", type=float)
-    parser.add_argument("--max-usd-per-trade", type=float)
-    parser.add_argument("--max-liquidity-fraction", type=float)
     parser.set_defaults(func=upsert_plan)
     return parser
 

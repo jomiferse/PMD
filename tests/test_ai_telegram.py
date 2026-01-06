@@ -33,6 +33,7 @@ def fake_redis(monkeypatch):
     class FakeRedis:
         def __init__(self):
             self.store = {}
+            self.expirations = {}
 
         def get(self, key):
             return self.store.get(key)
@@ -41,13 +42,28 @@ def fake_redis(monkeypatch):
             if nx and key in self.store:
                 return None
             self.store[key] = value
+            if ex is not None:
+                self.expirations[key] = ex
             return True
 
         def incrbyfloat(self, key, amount):
             return None
 
         def expire(self, key, ttl):
-            return None
+            if key not in self.store:
+                return False
+            self.expirations[key] = ttl
+            return True
+
+        def ttl(self, key):
+            if key not in self.store:
+                return -2
+            return self.expirations.get(key, -1)
+
+        def delete(self, key):
+            self.store.pop(key, None)
+            self.expirations.pop(key, None)
+            return True
 
     monkeypatch.setattr("app.core.ai_copilot.redis_conn", FakeRedis())
 
@@ -309,11 +325,11 @@ def test_confirm_payload_contains_draft(db_session, monkeypatch):
         }
     }
     handle_telegram_callback(db_session, payload)
-    assert "Draft order payload" in sent["text"]
-    assert "side" in sent["text"]
-    assert "price" in sent["text"]
-    assert "size" in sent["text"]
-    assert "notional_usd" in sent["text"]
+    assert "Confirmed (manual only)." in sent["text"]
+    assert "Suggested side" in sent["text"]
+    assert "Suggested amount" in sent["text"]
+    assert "Slug: market-1" in sent["text"]
+    assert "https://polymarket.com/market/market-1" in sent["text"]
     assert "null" not in sent["text"].lower()
 
 
@@ -367,8 +383,8 @@ def test_confirm_payload_missing_inputs_note(db_session, monkeypatch):
         }
     }
     handle_telegram_callback(db_session, payload)
-    assert "Draft order unavailable" in sent["text"]
-    assert "Missing inputs" in sent["text"]
+    assert "Confirmed (manual only)." in sent["text"]
+    assert "Draft inputs missing" in sent["text"]
     assert "null" not in sent["text"].lower()
 
 
@@ -407,21 +423,37 @@ def test_duplicate_callback_id_is_idempotent(db_session, monkeypatch):
     class FakeRedis:
         def __init__(self):
             self.store = {}
+            self.expirations = {}
 
         def set(self, key, value, nx=False, ex=None):
             if nx and key in self.store:
                 return None
             self.store[key] = value
+            if ex is not None:
+                self.expirations[key] = ex
             return True
 
         def get(self, key):
-            return None
+            return self.store.get(key)
 
         def incrbyfloat(self, key, amount):
             return None
 
         def expire(self, key, ttl):
-            return None
+            if key not in self.store:
+                return False
+            self.expirations[key] = ttl
+            return True
+
+        def ttl(self, key):
+            if key not in self.store:
+                return -2
+            return self.expirations.get(key, -1)
+
+        def delete(self, key):
+            self.store.pop(key, None)
+            self.expirations.pop(key, None)
+            return True
 
     monkeypatch.setattr("app.core.ai_copilot.redis_conn", FakeRedis())
     monkeypatch.setattr("app.core.ai_copilot.edit_message_reply_markup", lambda *args, **kwargs: None)

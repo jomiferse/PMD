@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.core.alert_classification import AlertClassification
+from app.core.alert_classification import AlertClassification, AlertClass
 from app.core.alerts import _enqueue_ai_recommendations, _resolve_user_preferences
 from app.core.user_settings import get_effective_user_settings
 from app.db import Base
@@ -27,6 +27,7 @@ def db_session():
 class FakeRedis:
     def __init__(self):
         self.store = {}
+        self.expirations = {}
 
     def get(self, key):
         return self.store.get(key)
@@ -35,6 +36,24 @@ class FakeRedis:
         if nx and key in self.store:
             return None
         self.store[key] = value
+        if ex is not None:
+            self.expirations[key] = ex
+        return True
+
+    def ttl(self, key):
+        if key not in self.store:
+            return -2
+        return self.expirations.get(key, -1)
+
+    def expire(self, key, ttl):
+        if key not in self.store:
+            return False
+        self.expirations[key] = ttl
+        return True
+
+    def delete(self, key):
+        self.store.pop(key, None)
+        self.expirations.pop(key, None)
         return True
 
 
@@ -76,8 +95,8 @@ def test_users_with_different_plans_get_different_caps(db_session):
     db_session.add_all([user_a, user_b])
     db_session.commit()
 
-    config_a = _resolve_user_preferences(user_a, None)
-    config_b = _resolve_user_preferences(user_b, None)
+    config_a = _resolve_user_preferences(user_a, None, db_session)
+    config_b = _resolve_user_preferences(user_b, None, db_session)
 
     assert config_a.max_copilot_per_day == 1
     assert config_b.max_copilot_per_day == 3
@@ -101,12 +120,21 @@ def test_cap_reached_uses_plan_limits(db_session, monkeypatch):
         "app.core.alerts.classify_alert_with_snapshots",
         lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
     )
+    monkeypatch.setattr("app.core.alerts._count_snapshot_points", lambda *_args, **_kwargs: 3)
+    monkeypatch.setattr("app.core.alerts._label_mapping_unknown", lambda *_args, **_kwargs: False)
 
     enqueued = []
     monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: enqueued.append(args))
 
-    config = _resolve_user_preferences(user, None)
-    _enqueue_ai_recommendations(db_session, config, [alert])
+    config = _resolve_user_preferences(user, None, db_session)
+    _enqueue_ai_recommendations(
+        db_session,
+        config,
+        [alert],
+        classifier=lambda *_args, **_kwargs: AlertClassification(
+            "REPRICING", "HIGH", "FOLLOW", alert_class=AlertClass.ACTIONABLE_STANDARD
+        ),
+    )
 
     assert not enqueued
     stored = fake_redis.store[f"copilot:last_eval:{user.user_id}"]

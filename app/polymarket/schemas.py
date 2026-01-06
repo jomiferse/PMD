@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 
 class PolymarketMarket(BaseModel):
     market_id: str
+    slug: str | None = None
     title: str
     category: str | None = None
     p_primary: float

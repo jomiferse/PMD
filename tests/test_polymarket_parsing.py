@@ -9,6 +9,22 @@ def _event_with_market(market: dict) -> dict:
     }
 
 
+def test_parse_sets_slug_when_present():
+    market = {
+        "id": "m-slugged",
+        "slug": "who-wins-2026",
+        "question": "Slugged market?",
+        "outcomePrices": '["0.25","0.75"]',
+        "outcomes": '["Yes","No"]',
+        "liquidityNum": 2000,
+        "volume24hr": 2000,
+    }
+    markets, parsed = _parse_markets([_event_with_market(market)], None, None)
+    assert parsed == 1
+    parsed_market = markets[0]
+    assert parsed_market.slug == "who-wins-2026"
+
+
 def test_parse_yesno_outcomes_sets_is_yesno():
     market = {
         "id": "m1",

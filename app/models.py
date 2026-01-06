@@ -5,6 +5,7 @@ from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .db import Base
 
+
 class MarketSnapshot(Base):
     __tablename__ = "market_snapshots"
     __table_args__ = (
@@ -18,6 +19,7 @@ class MarketSnapshot(Base):
     market_id: Mapped[str] = mapped_column(String(128), index=True)
     title: Mapped[str] = mapped_column(String(512))
     category: Mapped[str] = mapped_column(String(128), default="unknown")
+    slug: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     market_p_yes: Mapped[float] = mapped_column(Float)  # implied prob (0-1)
     primary_outcome_label: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -85,6 +87,7 @@ class Alert(Base):
     delta_pct: Mapped[float] = mapped_column(Float, default=0.0)
     liquidity: Mapped[float] = mapped_column(Float, default=0.0)
     volume_24h: Mapped[float] = mapped_column(Float, default=0.0)
+    best_ask: Mapped[float] = mapped_column(Float, default=0.0)
     strength: Mapped[str] = mapped_column(String(16), default="MEDIUM")
     snapshot_bucket: Mapped[DateTime] = mapped_column(DateTime, nullable=False)
     source_ts: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
@@ -118,9 +121,6 @@ class Plan(Base):
     fast_window_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     fast_max_themes_per_digest: Mapped[int | None] = mapped_column(Integer, nullable=True)
     fast_max_markets_per_theme: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    risk_budget_usd_per_day: Mapped[float | None] = mapped_column(Float, nullable=True)
-    max_usd_per_trade: Mapped[float | None] = mapped_column(Float, nullable=True)
-    max_liquidity_fraction: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), nullable=False)
 
 
@@ -160,14 +160,31 @@ class UserAlertPreference(Base):
     max_markets_per_theme: Mapped[int | None] = mapped_column(Integer, nullable=True)
     p_min: Mapped[float | None] = mapped_column(Float, nullable=True)
     p_max: Mapped[float | None] = mapped_column(Float, nullable=True)
-    risk_budget_usd_per_day: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
-    max_usd_per_trade: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
-    max_liquidity_fraction: Mapped[float] = mapped_column(Float, default=0.01, nullable=False)
     fast_signals_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     fast_window_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     fast_max_themes_per_digest: Mapped[int | None] = mapped_column(Integer, nullable=True)
     fast_max_markets_per_theme: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), nullable=False)
+
+
+class UserPreference(Base):
+    __tablename__ = "user_preferences"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    risk_budget_usd_per_day: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    max_usd_per_trade: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    max_liquidity_fraction: Mapped[float] = mapped_column(Float, default=0.01, nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), nullable=False)
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime,
+        default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
 
 
 class AlertDelivery(Base):
@@ -187,6 +204,11 @@ class AlertDelivery(Base):
     )
     delivered_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), nullable=False)
     delivery_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    filter_reasons: Mapped[list | None] = mapped_column(
+        JSON().with_variant(JSONB, "postgresql"),
+        nullable=True,
+        default=list,
+    )
 
 
 class AiRecommendation(Base):

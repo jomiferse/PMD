@@ -155,7 +155,13 @@ def format_k(value: int) -> str:
 
 
 def format_range(low: int, high: int) -> str:
-    return f"{format_k(low)}-{format_k(high)}"
+    low_label = format_k(low)
+    high_label = format_k(high)
+    for suffix in ("k", "m"):
+        if low_label.endswith(suffix) and high_label.endswith(suffix):
+            low_value = low_label[: -len(suffix)]
+            return f"{low_value}-{high_label}"
+    return f"{low_label}-{high_label}"
 
 
 def extract_theme(title: str, *, category: str | None = None, slug: str | None = None) -> ThemeExtract:

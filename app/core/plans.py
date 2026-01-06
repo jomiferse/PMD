@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from . import defaults
+from .alert_classification import AlertClass
+
 
 DEFAULT_PLAN_NAME = "basic"
 RECOMMENDED_PLAN_NAME = "pro"
@@ -35,9 +38,6 @@ class PlanSeed:
     fast_window_minutes: int
     fast_max_themes_per_digest: int
     fast_max_markets_per_theme: int
-    risk_budget_usd_per_day: float
-    max_usd_per_trade: float
-    max_liquidity_fraction: float
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -61,9 +61,6 @@ class PlanSeed:
             "fast_window_minutes": self.fast_window_minutes,
             "fast_max_themes_per_digest": self.fast_max_themes_per_digest,
             "fast_max_markets_per_theme": self.fast_max_markets_per_theme,
-            "risk_budget_usd_per_day": self.risk_budget_usd_per_day,
-            "max_usd_per_trade": self.max_usd_per_trade,
-            "max_liquidity_fraction": self.max_liquidity_fraction,
         }
 
 
@@ -89,9 +86,6 @@ PLAN_SEEDS = [
         fast_window_minutes=15,
         fast_max_themes_per_digest=2,
         fast_max_markets_per_theme=2,
-        risk_budget_usd_per_day=0.0,
-        max_usd_per_trade=0.0,
-        max_liquidity_fraction=0.01,
     ),
     PlanSeed(
         name="pro",
@@ -114,9 +108,6 @@ PLAN_SEEDS = [
         fast_window_minutes=10,
         fast_max_themes_per_digest=2,
         fast_max_markets_per_theme=2,
-        risk_budget_usd_per_day=200.0,
-        max_usd_per_trade=100.0,
-        max_liquidity_fraction=0.01,
     ),
     PlanSeed(
         name="elite",
@@ -139,9 +130,6 @@ PLAN_SEEDS = [
         fast_window_minutes=5,
         fast_max_themes_per_digest=2,
         fast_max_markets_per_theme=2,
-        risk_budget_usd_per_day=500.0,
-        max_usd_per_trade=250.0,
-        max_liquidity_fraction=0.01,
     ),
 ]
 
@@ -161,3 +149,47 @@ def upgrade_target_name(current_plan: str | None) -> str | None:
     if normalized in UPGRADE_PATH:
         return UPGRADE_PATH[normalized]
     return RECOMMENDED_PLAN_NAME
+
+
+@dataclass(frozen=True)
+class PlanAlertRules:
+    allow_info_alerts: bool
+    allow_fast_alerts: bool
+    soft_band: tuple[float, float]
+    strict_band: tuple[float, float]
+    allowed_classes: tuple[AlertClass, ...]
+
+
+PLAN_ALERT_RULES: dict[str, PlanAlertRules] = {
+    "basic": PlanAlertRules(
+        allow_info_alerts=False,
+        allow_fast_alerts=False,
+        soft_band=(defaults.DEFAULT_SOFT_P_MIN, defaults.DEFAULT_SOFT_P_MAX),
+        strict_band=(defaults.DEFAULT_STRICT_P_MIN, defaults.DEFAULT_STRICT_P_MAX),
+        allowed_classes=(AlertClass.ACTIONABLE_STANDARD,),
+    ),
+    "pro": PlanAlertRules(
+        allow_info_alerts=True,
+        allow_fast_alerts=False,
+        soft_band=(defaults.DEFAULT_SOFT_P_MIN, defaults.DEFAULT_SOFT_P_MAX),
+        strict_band=(defaults.DEFAULT_STRICT_P_MIN, defaults.DEFAULT_STRICT_P_MAX),
+        allowed_classes=(AlertClass.ACTIONABLE_STANDARD, AlertClass.INFO_ONLY),
+    ),
+    "elite": PlanAlertRules(
+        allow_info_alerts=True,
+        allow_fast_alerts=True,
+        soft_band=(defaults.DEFAULT_SOFT_P_MIN, defaults.DEFAULT_SOFT_P_MAX),
+        strict_band=(defaults.DEFAULT_STRICT_P_MIN, defaults.DEFAULT_STRICT_P_MAX),
+        allowed_classes=(
+            AlertClass.ACTIONABLE_FAST,
+            AlertClass.ACTIONABLE_STANDARD,
+            AlertClass.INFO_ONLY,
+        ),
+    ),
+}
+PLAN_ALERT_RULES["_default"] = PLAN_ALERT_RULES["pro"]
+
+
+def plan_alert_rules(plan_name: str | None) -> PlanAlertRules:
+    normalized = (plan_name or "").strip().lower()
+    return PLAN_ALERT_RULES.get(normalized, PLAN_ALERT_RULES["_default"])

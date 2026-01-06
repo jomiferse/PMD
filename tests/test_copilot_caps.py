@@ -42,6 +42,11 @@ class FakeRedis:
             self.expirations[key] = ex
         return True
 
+    def ttl(self, key):
+        if key not in self.store:
+            return -2
+        return self.expirations.get(key, -1)
+
     def incr(self, key):
         current = self.store.get(key)
         if current is None:
@@ -54,6 +59,11 @@ class FakeRedis:
 
     def expire(self, key, ttl):
         self.expirations[key] = ttl
+        return True
+
+    def delete(self, key):
+        self.store.pop(key, None)
+        self.expirations.pop(key, None)
         return True
 
 
@@ -96,6 +106,8 @@ def _make_config(user_id):
         digest_window_minutes=60,
         max_alerts_per_digest=10,
         ai_copilot_enabled=True,
+        copilot_user_enabled=True,
+        copilot_plan_enabled=True,
         risk_budget_usd_per_day=100.0,
         max_usd_per_trade=20.0,
         max_liquidity_fraction=0.01,
@@ -105,6 +117,12 @@ def _make_config(user_id):
         fast_max_markets_per_theme=defaults.DEFAULT_FAST_MAX_MARKETS_PER_THEME,
         p_min=defaults.DEFAULT_P_MIN,
         p_max=defaults.DEFAULT_P_MAX,
+        p_soft_min=defaults.DEFAULT_SOFT_P_MIN,
+        p_soft_max=defaults.DEFAULT_SOFT_P_MAX,
+        p_strict_min=defaults.DEFAULT_STRICT_P_MIN,
+        p_strict_max=defaults.DEFAULT_STRICT_P_MAX,
+        allow_info_alerts=True,
+        allow_fast_alerts=True,
         plan_name="default",
         max_copilot_per_day=5,
         max_copilot_per_digest=1,

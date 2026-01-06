@@ -6,14 +6,10 @@ from datetime import datetime, timezone
 import httpx
 
 from app.db import SessionLocal
-from app.models import Plan, User, UserAlertPreference
+from app.models import Plan, User, UserAlertPreference, UserPreference
 from app.settings import settings
 from app.core.effective_settings import invalidate_effective_settings_cache
 from app.core.plans import DEFAULT_PLAN_NAME
-from app.trading.polymarket_credentials import (
-    clear_user_polymarket_credentials,
-    set_user_polymarket_credentials,
-)
 
 
 def _resolve_user(db, identifier: str) -> User:
@@ -59,6 +55,9 @@ def add_user(args: argparse.Namespace) -> None:
         db.add(user)
         db.commit()
         db.refresh(user)
+        pref = UserPreference(user_id=user.user_id, created_at=datetime.now(timezone.utc))
+        db.add(pref)
+        db.commit()
         print(str(user.user_id))
     finally:
         db.close()
@@ -83,8 +82,13 @@ def set_preferences(args: argparse.Namespace) -> None:
         if not pref:
             pref = UserAlertPreference(user_id=user.user_id, created_at=datetime.now(timezone.utc))
             db.add(pref)
+        risk_pref = db.query(UserPreference).filter(UserPreference.user_id == user.user_id).one_or_none()
+        if not risk_pref:
+            risk_pref = UserPreference(user_id=user.user_id, created_at=datetime.now(timezone.utc))
+            db.add(risk_pref)
         overrides = _load_overrides(user)
         overrides_updated = False
+        risk_updated = False
 
         if args.min_liquidity is not None:
             pref.min_liquidity = args.min_liquidity
@@ -111,17 +115,20 @@ def set_preferences(args: argparse.Namespace) -> None:
         if args.ai_copilot_enabled is not None:
             user.copilot_enabled = args.ai_copilot_enabled
         if args.risk_budget_usd_per_day is not None:
-            pref.risk_budget_usd_per_day = args.risk_budget_usd_per_day
-            overrides["risk_budget_usd_per_day"] = args.risk_budget_usd_per_day
+            risk_pref.risk_budget_usd_per_day = args.risk_budget_usd_per_day
+            overrides.pop("risk_budget_usd_per_day", None)
             overrides_updated = True
+            risk_updated = True
         if args.max_usd_per_trade is not None:
-            pref.max_usd_per_trade = args.max_usd_per_trade
-            overrides["max_usd_per_trade"] = args.max_usd_per_trade
+            risk_pref.max_usd_per_trade = args.max_usd_per_trade
+            overrides.pop("max_usd_per_trade", None)
             overrides_updated = True
+            risk_updated = True
         if args.max_liquidity_fraction is not None:
-            pref.max_liquidity_fraction = args.max_liquidity_fraction
-            overrides["max_liquidity_fraction"] = args.max_liquidity_fraction
+            risk_pref.max_liquidity_fraction = args.max_liquidity_fraction
+            overrides.pop("max_liquidity_fraction", None)
             overrides_updated = True
+            risk_updated = True
         if args.fast_signals_enabled is not None:
             pref.fast_signals_enabled = args.fast_signals_enabled
             overrides["fast_signals_enabled"] = args.fast_signals_enabled
@@ -135,6 +142,8 @@ def set_preferences(args: argparse.Namespace) -> None:
 
         if overrides_updated:
             user.overrides_json = overrides
+        if risk_updated:
+            risk_pref.updated_at = datetime.now(timezone.utc)
 
         db.commit()
         invalidate_effective_settings_cache(user.user_id)
@@ -183,36 +192,6 @@ def test_delivery(args: argparse.Namespace) -> None:
         db.close()
 
 
-def set_polymarket_creds(args: argparse.Namespace) -> None:
-    db = SessionLocal()
-    try:
-        user = _resolve_user(db, args.user)
-        if args.clear:
-            removed = clear_user_polymarket_credentials(db, user.user_id)
-            print("cleared" if removed else "no credentials found")
-            return
-
-        if not args.private_key:
-            raise SystemExit("--private-key is required unless --clear is set")
-        if not args.funder_address:
-            raise SystemExit("--funder-address is required unless --clear is set")
-
-        payload = {
-            "private_key": args.private_key,
-            "api_key": args.api_key,
-            "api_secret": args.api_secret,
-            "api_passphrase": args.api_passphrase,
-            "signature_type": args.signature_type,
-            "funder_address": args.funder_address,
-        }
-        record = set_user_polymarket_credentials(db, user.user_id, payload)
-        if not record:
-            raise SystemExit("failed to store credentials (check encryption key)")
-        print(f"updated polymarket credentials for {user.user_id}")
-    finally:
-        db.close()
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Manage PMD users")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -251,17 +230,6 @@ def build_parser() -> argparse.ArgumentParser:
     test = subparsers.add_parser("test", help="Send a test Telegram message to a user")
     test.add_argument("--user", required=True, help="User ID or name")
     test.set_defaults(func=test_delivery)
-
-    creds = subparsers.add_parser("set-polymarket-creds", help="Store per-user Polymarket credentials")
-    creds.add_argument("--user", required=True, help="User ID or name")
-    creds.add_argument("--private-key")
-    creds.add_argument("--api-key")
-    creds.add_argument("--api-secret")
-    creds.add_argument("--api-passphrase")
-    creds.add_argument("--signature-type", type=int, default=0)
-    creds.add_argument("--funder-address")
-    creds.add_argument("--clear", action="store_true")
-    creds.set_defaults(func=set_polymarket_creds)
 
     return parser
 

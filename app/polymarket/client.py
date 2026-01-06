@@ -6,6 +6,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from .schemas import PolymarketMarket
 from ..settings import settings
 from ..core import defaults
+from ..core.market_links import normalize_slug
 
 logger = logging.getLogger(__name__)
 
@@ -260,9 +261,17 @@ def _parse_markets(
             best_ask = _parse_float(m.get("bestAsk"))
             last_trade_price = _parse_float(m.get("lastTradePrice") or m.get("lastTradePriceNum"))
 
-            market_id = str(m.get("slug") or m.get("id") or "")
+            # Prefer the canonical market id when present; fall back to slug for backward compatibility.
+            market_id = str(m.get("id") or m.get("slug") or "")
             if not market_id:
                 continue
+
+            slug = (
+                normalize_slug(m.get("slug"))
+                or normalize_slug(m.get("ticker"))
+                or normalize_slug(event_slug)
+                or normalize_slug(event_title)
+            )
 
             parsed_count += 1
             if liquidity_min is not None and liquidity < liquidity_min:
@@ -287,6 +296,7 @@ def _parse_markets(
                     market_id=market_id,
                     title=title,
                     category=event_title or str(event_slug),
+                    slug=slug,
                     p_primary=p_primary,
                     outcome_prices=outcome_prices,
                     primary_outcome_label=primary_outcome_label,

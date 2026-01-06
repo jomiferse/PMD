@@ -117,6 +117,7 @@ def compute_dislocation_alerts(
                 delta_pct=delta_pct,
                 liquidity=snap["liquidity"],
                 volume_24h=snap["volume_24h"],
+                best_ask=snap.get("best_ask", 0.0),
                 strength=strength.value,
                 snapshot_bucket=snap["snapshot_bucket"],
                 source_ts=snap["source_ts"],

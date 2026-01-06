@@ -3,11 +3,12 @@ import html
 import json
 import logging
 import re
+import time
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from urllib.parse import quote
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import redis
@@ -29,22 +30,25 @@ from ..models import (
 )
 from ..settings import settings
 from . import defaults
+from .ai_copilot import init_copilot_run, log_copilot_run_summary, store_copilot_last_status
 from .alert_strength import AlertStrength
 from .user_settings import get_effective_user_settings
-from .alert_classification import AlertClassification, classify_alert, classify_alert_with_snapshots
+from .alert_classification import AlertClass, AlertClassification, classify_alert, classify_alert_with_snapshots
 from .fast_signals import FAST_ALERT_TYPE
+from .market_links import attach_market_slugs, market_url
 from .plans import upgrade_target_name
 
 logger = logging.getLogger(__name__)
 redis_conn = redis.from_url(settings.REDIS_URL)
 queue = Queue("default", connection=redis_conn)
+READ_ONLY_DISCLAIMER = "<i>Read-only analytics • Manual execution only • Not financial advice</i>"
 
 USER_DIGEST_LAST_SENT_KEY = "alerts:digest:last_sent:user:{user_id}"
 USER_DIGEST_LAST_PAYLOAD_KEY = "alerts:last_digest:user:{user_id}"
 TENANT_DIGEST_LAST_PAYLOAD_KEY = "alerts:last_digest:{tenant_id}"
 USER_FAST_DIGEST_LAST_SENT_KEY = "alerts:fast:last_sent:user:{user_id}"
 DIGEST_SENT_FINGERPRINT_KEY = "digest:sent:{user_id}:{fingerprint_hash}"
-COPILOT_THEME_DEDUPE_KEY = "copilot:sent:{user_id}:{theme_key}"
+COPILOT_THEME_DEDUPE_KEY = "copilot:theme:{user_id}:{theme_key}"
 COPILOT_LAST_EVAL_KEY = "copilot:last_eval:{user_id}"
 COPILOT_DAILY_COUNT_KEY = "copilot:count:{user_id}:{date}"
 COPILOT_LAST_EVAL_TTL_SECONDS = 60 * 60 * 24
@@ -66,6 +70,8 @@ class UserDigestConfig:
     digest_window_minutes: int
     max_alerts_per_digest: int
     ai_copilot_enabled: bool
+    copilot_user_enabled: bool
+    copilot_plan_enabled: bool
     risk_budget_usd_per_day: float
     max_usd_per_trade: float
     max_liquidity_fraction: float
@@ -81,6 +87,12 @@ class UserDigestConfig:
     copilot_theme_ttl_minutes: int
     max_themes_per_digest: int
     max_markets_per_theme: int
+    p_soft_min: float = defaults.DEFAULT_SOFT_P_MIN
+    p_soft_max: float = defaults.DEFAULT_SOFT_P_MAX
+    p_strict_min: float = defaults.DEFAULT_STRICT_P_MIN
+    p_strict_max: float = defaults.DEFAULT_STRICT_P_MAX
+    allow_info_alerts: bool = defaults.DEFAULT_ALLOW_INFO_ALERTS
+    allow_fast_alerts: bool = defaults.DEFAULT_ALLOW_FAST_ALERTS
 
 
 @dataclass
@@ -99,8 +111,19 @@ class FastDigestPayload:
     window_minutes: int
 
 
+@dataclass(frozen=True)
+class DeliveryDecision:
+    deliver: bool
+    alert_class: AlertClass
+    band_applied: str
+    prob_used: float | None
+    reason: str | None = None
+    within_band: bool = True
+
+
 class CopilotIneligibilityReason(str, Enum):
     USER_DISABLED = "USER_DISABLED"
+    PLAN_DISABLED = "PLAN_DISABLED"
     CAP_REACHED = "CAP_REACHED"
     COPILOT_DEDUPE_ACTIVE = "COPILOT_DEDUPE_ACTIVE"
     MUTED = "MUTED"
@@ -115,6 +138,7 @@ class CopilotIneligibilityReason(str, Enum):
 
 _COPILOT_REASON_ORDER = [
     CopilotIneligibilityReason.USER_DISABLED.value,
+    CopilotIneligibilityReason.PLAN_DISABLED.value,
     CopilotIneligibilityReason.CAP_REACHED.value,
     CopilotIneligibilityReason.COPILOT_DEDUPE_ACTIVE.value,
     CopilotIneligibilityReason.MUTED.value,
@@ -126,6 +150,31 @@ _COPILOT_REASON_ORDER = [
     CopilotIneligibilityReason.INSUFFICIENT_SNAPSHOTS.value,
     CopilotIneligibilityReason.MISSING_PRICE_OR_LIQUIDITY.value,
 ]
+
+
+class FilterReason(str, Enum):
+    NO_STRONG_IN_DIGEST = "NO_STRONG_IN_DIGEST"
+    STRENGTH_NOT_ALLOWED = "STRENGTH_NOT_ALLOWED"
+    LIQUIDITY_BELOW_MIN = "LIQUIDITY_BELOW_MIN"
+    VOLUME_BELOW_MIN = "VOLUME_BELOW_MIN"
+    ABS_MOVE_BELOW_MIN = "ABS_MOVE_BELOW_MIN"
+    P_OUT_OF_BAND = "P_OUT_OF_BAND"
+    LABEL_MAPPING_UNKNOWN_BLOCKED = "LABEL_MAPPING_UNKNOWN_BLOCKED"
+    MUTED = "MUTED"
+    DIGEST_THROTTLED = "DIGEST_THROTTLED"
+    COPILOT_CAP_REACHED = "COPILOT_CAP_REACHED"
+    TENANT_MISMATCH = "TENANT_MISMATCH"
+    PREFS_MISSING_DEFAULTS_USED = "PREFS_MISSING_DEFAULTS_USED"
+    NON_ACTIONABLE = "NON_ACTIONABLE"
+    INFO_ONLY_BLOCKED = "INFO_ONLY_BLOCKED"
+    STRICT_BAND_BLOCKED = "STRICT_BAND_BLOCKED"
+    FAST_NOT_ALLOWED = "FAST_NOT_ALLOWED"
+
+
+COPILOT_RUN_SKIP_NO_ACTIONABLE_THEMES = "NO_ACTIONABLE_THEMES"
+COPILOT_RUN_SKIP_NO_ALERTS = "NO_ALERTS"
+COPILOT_RUN_SKIP_MISSING_CHAT_ID = "MISSING_CHAT_ID"
+COPILOT_RUN_SKIP_RECENT_DIGEST = "DIGEST_RECENTLY_SENT"
 
 
 @dataclass
@@ -152,7 +201,7 @@ async def send_user_digests(db: Session, tenant_id: str) -> dict | None:
     results = []
     sent_count = 0
     for user in users:
-        config = _resolve_user_preferences(user, prefs.get(user.user_id))
+        config = _resolve_user_preferences(user, prefs.get(user.user_id), db=db)
         now_ts = datetime.now(timezone.utc)
         fast_payload, _ = _prepare_fast_digest(
             db,
@@ -202,8 +251,14 @@ def _load_user_preferences(
 def _resolve_user_preferences(
     user: User,
     pref: UserAlertPreference | None,
+    db: Session | None = None,
 ) -> UserDigestConfig:
-    effective = get_effective_user_settings(user, pref=pref)
+    effective = get_effective_user_settings(user, pref=pref, db=db)
+    plan = getattr(user, "plan", None)
+    plan_copilot_enabled = True
+    if plan is not None and getattr(plan, "copilot_enabled", None) is not None:
+        plan_copilot_enabled = bool(plan.copilot_enabled)
+    user_copilot_enabled = bool(getattr(user, "copilot_enabled", False))
     min_liquidity = effective.min_liquidity
     min_volume_24h = effective.min_volume_24h
     min_abs_price_move = effective.min_abs_move
@@ -226,6 +281,8 @@ def _resolve_user_preferences(
         digest_window_minutes=max(int(digest_window_minutes), 1),
         max_alerts_per_digest=max(int(max_alerts_per_digest), 1),
         ai_copilot_enabled=ai_copilot_enabled,
+        copilot_user_enabled=user_copilot_enabled,
+        copilot_plan_enabled=plan_copilot_enabled,
         risk_budget_usd_per_day=risk_budget_usd_per_day,
         max_usd_per_trade=max_usd_per_trade,
         max_liquidity_fraction=max_liquidity_fraction,
@@ -235,6 +292,12 @@ def _resolve_user_preferences(
         fast_max_markets_per_theme=max(int(effective.fast_max_markets_per_theme), 1),
         p_min=float(effective.p_min),
         p_max=float(effective.p_max),
+        p_soft_min=float(effective.p_soft_min),
+        p_soft_max=float(effective.p_soft_max),
+        p_strict_min=float(effective.p_strict_min),
+        p_strict_max=float(effective.p_strict_max),
+        allow_info_alerts=bool(effective.allow_info_alerts),
+        allow_fast_alerts=bool(effective.allow_fast_alerts),
         plan_name=effective.plan_name,
         max_copilot_per_day=max(int(effective.max_copilot_per_day), 0),
         max_copilot_per_digest=max(int(effective.max_copilot_per_digest), 1),
@@ -253,16 +316,62 @@ def _normalize_allowed_strengths(raw: set[str] | None) -> set[str]:
     return parsed or {AlertStrength.STRONG.value}
 
 
+def _note_filter_reason(
+    alert: Alert,
+    reason: str,
+    reason_map: dict[int, list[str]],
+    reason_events: list[str],
+) -> None:
+    reason_events.append(reason)
+    if alert.id is None:
+        return
+    reasons = reason_map.setdefault(alert.id, [])
+    if reason not in reasons:
+        reasons.append(reason)
+
+
 async def _send_user_digest(
     db: Session,
     tenant_id: str,
     config: UserDigestConfig,
     fast_section: str | None = None,
 ) -> dict:
+    run_id = str(uuid4())
+    run_started_at = time.time()
+    metrics = {
+        "candidate_alerts_count": 0,
+        "after_pref_filter_count": 0,
+        "after_strength_gate_count": 0,
+        "after_p_band_count": 0,
+        "after_actionable_count": 0,
+        "after_caps_count": 0,
+        "delivered_count": 0,
+    }
+    filter_reasons_by_alert_id: dict[int, list[str]] = {}
+    filter_reason_events: list[str] = []
     window_minutes = max(config.digest_window_minutes, 1)
     now_ts = datetime.now(timezone.utc)
 
     if _digest_recently_sent(config.user_id, now_ts, window_minutes):
+        _emit_copilot_run_summary(
+            run_id=run_id,
+            run_started_at=run_started_at,
+            config=config,
+            digest_window_minutes=window_minutes,
+            themes_total=0,
+            themes_candidate=0,
+            themes_eligible=0,
+            themes_selected=0,
+            skipped_by_reason_counts={COPILOT_RUN_SKIP_RECENT_DIGEST: 1},
+            daily_count=0,
+            daily_limit=max(config.max_copilot_per_day, 0),
+            digest_limit=max(config.max_copilot_per_digest, 1),
+            llm_calls_attempted=0,
+            llm_calls_succeeded=0,
+            telegram_sends_attempted=0,
+            telegram_sends_succeeded=0,
+        )
+        _log_digest_metrics(config.user_id, metrics, filter_reason_events)
         return {"user_id": str(config.user_id), "sent": False, "reason": "recent_digest"}
 
     window_start = now_ts - timedelta(minutes=window_minutes)
@@ -275,30 +384,37 @@ async def _send_user_digest(
         )
         .all()
     )
+    metrics["candidate_alerts_count"] = len(rows)
     if not rows:
+        _emit_copilot_run_summary(
+            run_id=run_id,
+            run_started_at=run_started_at,
+            config=config,
+            digest_window_minutes=window_minutes,
+            themes_total=0,
+            themes_candidate=0,
+            themes_eligible=0,
+            themes_selected=0,
+            skipped_by_reason_counts={COPILOT_RUN_SKIP_NO_ALERTS: 1},
+            daily_count=0,
+            daily_limit=max(config.max_copilot_per_day, 0),
+            digest_limit=max(config.max_copilot_per_digest, 1),
+            llm_calls_attempted=0,
+            llm_calls_succeeded=0,
+            telegram_sends_attempted=0,
+            telegram_sends_succeeded=0,
+        )
+        _log_digest_metrics(config.user_id, metrics, filter_reason_events)
         return {"user_id": str(config.user_id), "sent": False, "reason": "no_alerts"}
 
-    included_alerts, filtered_out = _filter_alerts_for_user(rows, config)
-
-    pyes_filtered: list[Alert] = []
-    pyes_candidates: list[Alert] = []
-    for alert in included_alerts:
-        if not _is_within_actionable_pyes(alert, config.p_min, config.p_max):
-            pyes_filtered.append(alert)
-            continue
-        pyes_candidates.append(alert)
-
-    if not config.telegram_chat_id:
-        _record_alert_deliveries(
-            db,
-            filtered_out + pyes_filtered,
-            pyes_candidates,
-            config.user_id,
-            now_ts,
-            sent_alert_ids=set(),
-            skip_reason="missing_chat_id",
-        )
-        return {"user_id": str(config.user_id), "sent": False, "reason": "missing_chat_id"}
+    included_alerts, filtered_out, base_filter_map, base_filter_reasons = _filter_alerts_for_user(
+        rows,
+        config,
+    )
+    filter_reasons_by_alert_id.update(base_filter_map)
+    filter_reason_events.extend(base_filter_reasons)
+    metrics["after_pref_filter_count"] = len(included_alerts)
+    metrics["after_strength_gate_count"] = len(included_alerts)
 
     classification_cache: dict[int, AlertClassification] = {}
 
@@ -311,33 +427,76 @@ async def _send_user_digest(
         classification_cache[key] = classification
         return classification
 
-    actionable_alerts: list[Alert] = []
-    non_actionable_alerts: list[Alert] = []
-    for alert in pyes_candidates:
+    deliverable_candidates: list[Alert] = []
+    filtered_by_decision: list[Alert] = []
+    for alert in included_alerts:
         classification = classifier(alert)
-        if _is_actionable_classification(classification):
-            actionable_alerts.append(alert)
+        decision = _evaluate_delivery_decision(alert, classification, config)
+        if decision.deliver:
+            deliverable_candidates.append(alert)
         else:
-            non_actionable_alerts.append(alert)
+            filtered_by_decision.append(alert)
+            if decision.reason:
+                _note_filter_reason(
+                    alert,
+                    decision.reason,
+                    filter_reasons_by_alert_id,
+                    filter_reason_events,
+                )
+            _log_alert_filter_decision(alert, classification, decision)
+    metrics["after_p_band_count"] = len(deliverable_candidates)
 
-    actionable_ranked = _dedupe_by_market_id(_rank_alerts(actionable_alerts))
-    total_actionable = len(actionable_ranked)
-    filtered_for_delivery = filtered_out + pyes_filtered
-    if defaults.DIGEST_ACTIONABLE_ONLY:
-        filtered_for_delivery += non_actionable_alerts
-    included_for_delivery = actionable_alerts if defaults.DIGEST_ACTIONABLE_ONLY else pyes_candidates
-
-    if total_actionable < 1:
+    if not config.telegram_chat_id:
+        _emit_copilot_run_summary(
+            run_id=run_id,
+            run_started_at=run_started_at,
+            config=config,
+            digest_window_minutes=window_minutes,
+            themes_total=0,
+            themes_candidate=0,
+            themes_eligible=0,
+            themes_selected=0,
+            skipped_by_reason_counts={COPILOT_RUN_SKIP_MISSING_CHAT_ID: 1},
+            daily_count=0,
+            daily_limit=max(config.max_copilot_per_day, 0),
+            digest_limit=max(config.max_copilot_per_digest, 1),
+            llm_calls_attempted=0,
+            llm_calls_succeeded=0,
+            telegram_sends_attempted=0,
+            telegram_sends_succeeded=0,
+        )
         _record_alert_deliveries(
             db,
-            filtered_for_delivery,
-            included_for_delivery,
+            filtered_out + filtered_by_decision,
+            deliverable_candidates,
             config.user_id,
             now_ts,
             sent_alert_ids=set(),
-            skip_reason="no_actionable_alerts",
+            skip_reason="missing_chat_id",
+            filter_reasons=filter_reasons_by_alert_id,
         )
-        return {"user_id": str(config.user_id), "sent": False, "reason": "no_actionable_alerts"}
+        _log_digest_metrics(config.user_id, metrics, filter_reason_events)
+        return {"user_id": str(config.user_id), "sent": False, "reason": "missing_chat_id"}
+
+    actionable_alerts: list[Alert] = []
+    info_only_alerts: list[Alert] = []
+    for alert in deliverable_candidates:
+        classification = classifier(alert)
+        alert_class = _resolve_alert_class(classification)
+        if alert_class == AlertClass.INFO_ONLY:
+            info_only_alerts.append(alert)
+        else:
+            actionable_alerts.append(alert)
+
+    actionable_ranked = _dedupe_by_market_id(_rank_alerts(actionable_alerts))
+    info_ranked = _dedupe_by_market_id(
+        _rank_alerts(info_only_alerts),
+        exclude_market_ids={alert.market_id for alert in actionable_ranked},
+    )
+    total_actionable = len(actionable_ranked)
+    metrics["after_actionable_count"] = total_actionable
+    filtered_for_delivery = filtered_out + filtered_by_decision
+    included_for_delivery = deliverable_candidates
 
     max_alerts = min(
         max(config.max_alerts_per_digest, 1),
@@ -345,6 +504,29 @@ async def _send_user_digest(
     )
 
     selected_actionable = actionable_ranked[:max_alerts]
+    for alert in actionable_ranked[max_alerts:]:
+        _note_filter_reason(
+            alert,
+            FilterReason.DIGEST_THROTTLED.value,
+            filter_reasons_by_alert_id,
+            filter_reason_events,
+        )
+        filtered_for_delivery.append(alert)
+    selected_alerts = list(selected_actionable)
+    remaining_slots = max(max_alerts - len(selected_actionable), 0)
+    info_slots = max_alerts if not selected_actionable else remaining_slots
+    if config.allow_info_alerts and info_slots > 0 and info_ranked:
+        selected_info = info_ranked[:info_slots]
+        selected_alerts.extend(selected_info)
+        for alert in info_ranked[info_slots:]:
+            _note_filter_reason(
+                alert,
+                FilterReason.DIGEST_THROTTLED.value,
+                filter_reasons_by_alert_id,
+                filter_reason_events,
+            )
+            filtered_for_delivery.append(alert)
+
     if actionable_alerts:
         _enqueue_ai_recommendations(
             db,
@@ -352,21 +534,31 @@ async def _send_user_digest(
             actionable_alerts,
             classifier,
             allow_enqueue=config.ai_copilot_enabled,
+            run_id=run_id,
+            run_started_at=run_started_at,
+            digest_window_minutes=window_minutes,
         )
-    selected_alerts = selected_actionable
-    if not defaults.DIGEST_ACTIONABLE_ONLY:
-        strong_alerts = [a for a in pyes_candidates if a.strength == AlertStrength.STRONG.value]
-        medium_alerts = [a for a in pyes_candidates if a.strength == AlertStrength.MEDIUM.value]
-
-        strong_ranked = _dedupe_by_market_id(_rank_alerts(strong_alerts))
-        medium_ranked = _dedupe_by_market_id(
-            _rank_alerts(medium_alerts),
-            exclude_market_ids={alert.market_id for alert in strong_ranked},
+    else:
+        _emit_copilot_run_summary(
+            run_id=run_id,
+            run_started_at=run_started_at,
+            config=config,
+            digest_window_minutes=window_minutes,
+            themes_total=0,
+            themes_candidate=0,
+            themes_eligible=0,
+            themes_selected=0,
+            skipped_by_reason_counts={COPILOT_RUN_SKIP_NO_ACTIONABLE_THEMES: 1},
+            daily_count=0,
+            daily_limit=max(config.max_copilot_per_day, 0),
+            digest_limit=max(config.max_copilot_per_digest, 1),
+            llm_calls_attempted=0,
+            llm_calls_succeeded=0,
+            telegram_sends_attempted=0,
+            telegram_sends_succeeded=0,
         )
-        selected_strong = strong_ranked[:max_alerts]
-        remaining = max(max_alerts - len(selected_strong), 0)
-        selected_medium = medium_ranked[:remaining] if remaining > 0 else []
-        selected_alerts = selected_strong + selected_medium
+    metrics["after_caps_count"] = len(selected_alerts)
+    attach_market_slugs(db, selected_alerts)
 
     if not selected_alerts:
         _record_alert_deliveries(
@@ -377,7 +569,9 @@ async def _send_user_digest(
             now_ts,
             sent_alert_ids=set(),
             skip_reason="no_selected_alerts",
+            filter_reasons=filter_reasons_by_alert_id,
         )
+        _log_digest_metrics(config.user_id, metrics, filter_reason_events)
         return {"user_id": str(config.user_id), "sent": False, "reason": "no_selected_alerts"}
 
     counts = {"REPRICING": 0, "LIQUIDITY_SWEEP": 0, "NOISY": 0}
@@ -411,7 +605,9 @@ async def _send_user_digest(
             now_ts,
             sent_alert_ids=set(),
             skip_reason="empty_message",
+            filter_reasons=filter_reasons_by_alert_id,
         )
+        _log_digest_metrics(config.user_id, metrics, filter_reason_events)
         return {"user_id": str(config.user_id), "sent": False, "reason": "empty_message"}
 
     if fast_section:
@@ -426,7 +622,9 @@ async def _send_user_digest(
             now_ts,
             sent_alert_ids=set(),
             skip_reason="digest_dedupe",
+            filter_reasons=filter_reasons_by_alert_id,
         )
+        _log_digest_metrics(config.user_id, metrics, filter_reason_events)
         return {"user_id": str(config.user_id), "sent": False, "reason": "digest_dedupe"}
 
     url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -440,6 +638,7 @@ async def _send_user_digest(
         async with httpx.AsyncClient(timeout=10) as client:
             response = await client.post(url, json=payload)
         if response.is_success:
+            sent_alert_ids = {alert.id for alert in selected_alerts if alert.id is not None}
             _record_digest_sent(config.user_id, tenant_id, now_ts, window_minutes, actionable_alerts, [])
             _record_alert_deliveries(
                 db,
@@ -447,8 +646,11 @@ async def _send_user_digest(
                 included_for_delivery,
                 config.user_id,
                 now_ts,
-                sent_alert_ids={alert.id for alert in selected_alerts if alert.id is not None},
+                sent_alert_ids=sent_alert_ids,
+                filter_reasons=filter_reasons_by_alert_id,
             )
+            metrics["delivered_count"] = len(sent_alert_ids)
+            _log_digest_metrics(config.user_id, metrics, filter_reason_events)
             logger.info(
                 "digest_sent user_id=%s window_minutes=%s actionable=%s",
                 config.user_id,
@@ -471,7 +673,9 @@ async def _send_user_digest(
             now_ts,
             sent_alert_ids=set(),
             skip_reason="telegram_failed",
+            filter_reasons=filter_reasons_by_alert_id,
         )
+        _log_digest_metrics(config.user_id, metrics, filter_reason_events)
         return {
             "user_id": str(config.user_id),
             "sent": False,
@@ -488,33 +692,61 @@ async def _send_user_digest(
             now_ts,
             sent_alert_ids=set(),
             skip_reason="telegram_exception",
+            filter_reasons=filter_reasons_by_alert_id,
         )
+        _log_digest_metrics(config.user_id, metrics, filter_reason_events)
         return {"user_id": str(config.user_id), "sent": False, "status_code": 0, "text": ""}
 
 
 def _filter_alerts_for_user(
     alerts: list[Alert],
     config: UserDigestConfig,
-) -> tuple[list[Alert], list[Alert]]:
+) -> tuple[list[Alert], list[Alert], dict[int, list[str]], list[str]]:
     included: list[Alert] = []
     filtered: list[Alert] = []
+    reasons_by_alert_id: dict[int, list[str]] = {}
+    reason_events: list[str] = []
 
     for alert in alerts:
         if alert.liquidity < config.min_liquidity:
             filtered.append(alert)
+            _note_filter_reason(
+                alert,
+                FilterReason.LIQUIDITY_BELOW_MIN.value,
+                reasons_by_alert_id,
+                reason_events,
+            )
             continue
         if alert.volume_24h < config.min_volume_24h:
             filtered.append(alert)
+            _note_filter_reason(
+                alert,
+                FilterReason.VOLUME_BELOW_MIN.value,
+                reasons_by_alert_id,
+                reason_events,
+            )
             continue
         if _alert_abs_move(alert) < config.min_abs_price_move:
             filtered.append(alert)
+            _note_filter_reason(
+                alert,
+                FilterReason.ABS_MOVE_BELOW_MIN.value,
+                reasons_by_alert_id,
+                reason_events,
+            )
             continue
         if alert.strength not in config.alert_strengths:
             filtered.append(alert)
+            _note_filter_reason(
+                alert,
+                FilterReason.STRENGTH_NOT_ALLOWED.value,
+                reasons_by_alert_id,
+                reason_events,
+            )
             continue
         included.append(alert)
 
-    return included, filtered
+    return included, filtered, reasons_by_alert_id, reason_events
 
 
 def _alert_abs_move(alert: Alert) -> float:
@@ -654,33 +886,36 @@ def _record_alert_deliveries(
     delivered_at: datetime,
     sent_alert_ids: set[int],
     skip_reason: str | None = None,
+    filter_reasons: dict[int, list[str]] | None = None,
 ) -> None:
-    rows: list[dict] = []
+    # Use dict keyed by alert_id to deduplicate - later entries win
+    # This prevents CardinalityViolation when same alert appears in both lists
+    rows_by_alert: dict[int, dict] = {}
+    filter_reasons = filter_reasons or {}
     for alert in filtered_alerts:
         if alert.id is None:
             continue
-        rows.append(
-            {
-                "alert_id": alert.id,
-                "user_id": user_id,
-                "delivered_at": delivered_at,
-                "delivery_status": DELIVERY_STATUS_FILTERED,
-            }
-        )
+        rows_by_alert[alert.id] = {
+            "alert_id": alert.id,
+            "user_id": user_id,
+            "delivered_at": delivered_at,
+            "delivery_status": DELIVERY_STATUS_FILTERED,
+            "filter_reasons": filter_reasons.get(alert.id, []),
+        }
 
     for alert in included_alerts:
         if alert.id is None:
             continue
         status = DELIVERY_STATUS_SENT if alert.id in sent_alert_ids else DELIVERY_STATUS_SKIPPED
-        rows.append(
-            {
-                "alert_id": alert.id,
-                "user_id": user_id,
-                "delivered_at": delivered_at,
-                "delivery_status": status,
-            }
-        )
+        rows_by_alert[alert.id] = {
+            "alert_id": alert.id,
+            "user_id": user_id,
+            "delivered_at": delivered_at,
+            "delivery_status": status,
+            "filter_reasons": filter_reasons.get(alert.id, []),
+        }
 
+    rows = list(rows_by_alert.values())
     if not rows:
         return
 
@@ -693,10 +928,37 @@ def _record_alert_deliveries(
         set_={
             "delivered_at": delivered_at,
             "delivery_status": stmt.excluded.delivery_status,
+            "filter_reasons": stmt.excluded.filter_reasons,
         },
     )
     db.execute(stmt)
     db.commit()
+
+
+def _log_digest_metrics(
+    user_id: UUID,
+    metrics: dict,
+    filter_reason_events: list[str] | None,
+) -> None:
+    counter = Counter(filter_reason_events or [])
+    top_reasons = counter.most_common(3)
+    top_summary = ",".join(f"{reason}:{count}" for reason, count in top_reasons)
+    logger.info(
+        (
+            "digest_metrics user_id=%s candidate_alerts_count=%s "
+            "after_pref_filter_count=%s after_strength_gate_count=%s after_p_band_count=%s "
+            "after_actionable_count=%s after_caps_count=%s delivered_count=%s top_filter_reasons=%s"
+        ),
+        user_id,
+        metrics.get("candidate_alerts_count", 0),
+        metrics.get("after_pref_filter_count", 0),
+        metrics.get("after_strength_gate_count", 0),
+        metrics.get("after_p_band_count", 0),
+        metrics.get("after_actionable_count", 0),
+        metrics.get("after_caps_count", 0),
+        metrics.get("delivered_count", 0),
+        top_summary or "none",
+    )
 
 
 def _prepare_fast_digest(
@@ -745,6 +1007,7 @@ def _prepare_fast_digest(
     if not filtered:
         return None, "no_fast_alerts"
 
+    attach_market_slugs(db, filtered)
     text = _format_fast_digest_message(
         filtered,
         window_minutes,
@@ -842,8 +1105,14 @@ def _format_digest_message(
     max_markets_per_theme: int | None = None,
     classifier=None,
 ) -> str:
-    if total_actionable < 1:
+    if not alerts:
         return ""
+
+    actionable_included = 0
+    for alert in alerts:
+        classification = classifier(alert) if classifier else classify_alert(alert)
+        if _is_actionable_classification(classification):
+            actionable_included += 1
 
     if defaults.THEME_GROUPING_ENABLED:
         return _format_grouped_digest_message(
@@ -854,7 +1123,8 @@ def _format_digest_message(
             classifier,
         )
 
-    header = f"<b>PMD - {total_actionable} actionable repricings ({window_minutes}m)</b>"
+    header_label = f"{actionable_included} actionable repricings" if actionable_included else f"{len(alerts)} signals"
+    header = f"<b>PMD - {header_label} ({window_minutes}m)</b>"
     lines = [header, ""]
 
     actionable_displayed = 0
@@ -869,14 +1139,14 @@ def _format_digest_message(
     if remaining_actionable > 0:
         lines.extend([f"+{remaining_actionable} more actionable repricings not shown", ""])
 
-    lines.append("<i>Read-only analytics - Not financial advice</i>")
+    lines.append(READ_ONLY_DISCLAIMER)
     return "\n".join(lines).strip()
 
 
 def _append_fast_section(confirmed_text: str, fast_section: str) -> str:
     if not fast_section:
         return confirmed_text
-    footer = "<i>Read-only analytics - Not financial advice</i>"
+    footer = READ_ONLY_DISCLAIMER
     if footer in confirmed_text:
         base, _ = confirmed_text.rsplit(footer, 1)
         base = base.rstrip()
@@ -927,11 +1197,11 @@ def _format_fast_digest_message(
             bullet_move = _format_compact_move(related_alert)
             bullet_p_yes = _format_p_yes_compact(related_alert)
             lines.append(f"- {bullet_title} | {bullet_move} | {bullet_p_yes}")
-        lines.append(_format_market_link(rep.market_id))
+        lines.append(_format_market_link(rep.market_id, getattr(rep, "market_slug", None)))
         lines.append("")
 
     if include_footer:
-        lines.append("<i>Read-only analytics - Not financial advice</i>")
+        lines.append(READ_ONLY_DISCLAIMER)
     return "\n".join(lines).strip()
 
 
@@ -975,10 +1245,10 @@ def _format_grouped_digest_message(
             bullet_move = _format_compact_move(related_alert)
             bullet_p_yes = _format_p_yes_compact(related_alert)
             lines.append(f"- {bullet_title} | {bullet_move} | {bullet_p_yes}")
-        lines.append(_format_market_link(rep.market_id))
+        lines.append(_format_market_link(rep.market_id, getattr(rep, "market_slug", None)))
         lines.append("")
 
-    lines.append("<i>Read-only analytics - Not financial advice</i>")
+    lines.append(READ_ONLY_DISCLAIMER)
     return "\n".join(lines).strip()
 
 
@@ -991,7 +1261,7 @@ def _format_digest_alert(
 ) -> list[str]:
     title = html.escape(alert.title[:120])
     classification = classification or (classifier(alert) if classifier else classify_alert(alert))
-    rank_label = "STRONG" if _is_actionable_classification(classification) else "NOTABLE"
+    rank_label = _rank_label_for_class(_resolve_alert_class(classification))
     move_text = _format_move(alert)
     p_yes_text = _format_p_yes(alert)
     liquidity_text = _format_liquidity_volume(alert)
@@ -1001,8 +1271,16 @@ def _format_digest_alert(
         f"Move: {move_text} | {p_yes_text}",
         liquidity_text,
         f"Suggested action: {classification.suggested_action}",
-        _format_market_link(alert.market_id),
+        _format_market_link(alert.market_id, getattr(alert, "market_slug", None)),
     ]
+
+
+def _rank_label_for_class(alert_class: AlertClass | None) -> str:
+    if alert_class == AlertClass.ACTIONABLE_FAST:
+        return "FAST"
+    if alert_class == AlertClass.ACTIONABLE_STANDARD:
+        return "ACTIONABLE"
+    return "INFO"
 
 
 def _format_compact_usd(value: float) -> str:
@@ -1032,18 +1310,162 @@ def _rank_digest_alerts(alerts: list[Alert]) -> list[Alert]:
     )
 
 
-def _is_actionable_classification(classification: AlertClassification) -> bool:
-    return (
-        classification.signal_type == "REPRICING"
-        and classification.confidence == "HIGH"
-        and classification.suggested_action == "FOLLOW"
+def _resolve_alert_class(classification: AlertClassification) -> AlertClass:
+    if classification.alert_class is not None:
+        return classification.alert_class
+    signal = (classification.signal_type or "").upper()
+    confidence = (classification.confidence or "").upper()
+    if signal in {"REPRICING", "LIQUIDITY_SWEEP"} and confidence == "HIGH":
+        return AlertClass.ACTIONABLE_FAST
+    if signal in {"REPRICING", "LIQUIDITY_SWEEP"}:
+        return AlertClass.ACTIONABLE_STANDARD
+    if signal == "MOMENTUM" and confidence in {"HIGH", "MEDIUM"}:
+        return AlertClass.ACTIONABLE_STANDARD
+    return AlertClass.INFO_ONLY
+
+
+def _evaluate_delivery_decision(
+    alert: Alert,
+    classification: AlertClassification,
+    config: UserDigestConfig,
+) -> DeliveryDecision:
+    alert_class = _resolve_alert_class(classification)
+    suggested_action = (classification.suggested_action or "").upper()
+    if alert_class in {AlertClass.ACTIONABLE_FAST, AlertClass.ACTIONABLE_STANDARD} and suggested_action != "FOLLOW":
+        return DeliveryDecision(
+            deliver=False,
+            alert_class=alert_class,
+            band_applied="none",
+            prob_used=_get_probability_for_band(alert),
+            within_band=True,
+            reason=FilterReason.NON_ACTIONABLE.value,
+        )
+    within_band = True
+    prob_within, prob_value = _is_within_probability_band(alert, config.p_soft_min, config.p_soft_max)
+    band_applied = "none"
+    reason: str | None = None
+
+    if alert_class == AlertClass.ACTIONABLE_FAST:
+        if not config.allow_fast_alerts:
+            reason = FilterReason.FAST_NOT_ALLOWED.value
+            return DeliveryDecision(
+                deliver=False,
+                alert_class=alert_class,
+                band_applied=band_applied,
+                prob_used=prob_value,
+                reason=reason,
+            )
+        return DeliveryDecision(
+            deliver=True,
+            alert_class=alert_class,
+            band_applied=band_applied,
+            prob_used=prob_value,
+        )
+
+    if alert_class == AlertClass.ACTIONABLE_STANDARD:
+        band_applied = "soft"
+        within_band = prob_within
+        reason = FilterReason.P_OUT_OF_BAND.value if not within_band else None
+        return DeliveryDecision(
+            deliver=within_band,
+            alert_class=alert_class,
+            band_applied=band_applied,
+            prob_used=prob_value,
+            within_band=within_band,
+            reason=reason,
+        )
+
+    band_applied = "strict"
+    prob_within, prob_value = _is_within_probability_band(alert, config.p_strict_min, config.p_strict_max)
+    if not config.allow_info_alerts:
+        return DeliveryDecision(
+            deliver=False,
+            alert_class=alert_class,
+            band_applied=band_applied,
+            prob_used=prob_value,
+            within_band=prob_within,
+            reason=FilterReason.INFO_ONLY_BLOCKED.value,
+        )
+    if not prob_within:
+        return DeliveryDecision(
+            deliver=False,
+            alert_class=alert_class,
+            band_applied=band_applied,
+            prob_used=prob_value,
+            within_band=prob_within,
+            reason=FilterReason.STRICT_BAND_BLOCKED.value,
+        )
+
+    return DeliveryDecision(
+        deliver=True,
+        alert_class=alert_class,
+        band_applied=band_applied,
+        prob_used=prob_value,
+        within_band=prob_within,
     )
 
 
+def _log_alert_filter_decision(
+    alert: Alert,
+    classification: AlertClassification,
+    decision: DeliveryDecision,
+) -> None:
+    if decision.deliver:
+        return
+    alert_class = _resolve_alert_class(classification)
+    logger.info(
+        "alert_filtered alert_id=%s market_id=%s market_kind=%s alert_class=%s signal_type=%s confidence=%s "
+        "band_applied=%s prob_used=%s within_band=%s reason=%s",
+        alert.id,
+        alert.market_id,
+        getattr(alert, "market_kind", None),
+        alert_class.value,
+        classification.signal_type,
+        classification.confidence,
+        decision.band_applied,
+        decision.prob_used,
+        decision.within_band,
+        decision.reason,
+    )
+
+
+def _is_actionable_classification(classification: AlertClassification) -> bool:
+    return _resolve_alert_class(classification) in {
+        AlertClass.ACTIONABLE_FAST,
+        AlertClass.ACTIONABLE_STANDARD,
+    }
+
+
 def _is_within_actionable_pyes(alert: Alert, p_min: float, p_max: float) -> bool:
-    if alert.market_p_yes is None:
-        return True
-    return p_min <= alert.market_p_yes <= p_max
+    prob_within, _ = _is_within_probability_band(alert, p_min, p_max)
+    return prob_within
+
+
+def _is_within_probability_band(alert: Alert, p_min: float, p_max: float) -> tuple[bool, float | None]:
+    value = _get_probability_for_band(alert)
+    if value is None:
+        return True, None
+    return (p_min <= value <= p_max), value
+
+
+def _get_probability_for_band(alert: Alert) -> float | None:
+    market_kind = getattr(alert, "market_kind", None)
+    is_yesno = getattr(alert, "is_yesno", None)
+    treat_yesno = (is_yesno is True) or (market_kind and market_kind.lower() == "yesno")
+    if treat_yesno and alert.market_p_yes is not None:
+        return alert.market_p_yes
+    if getattr(alert, "is_yesno", None) is False and not treat_yesno:
+        for attr in ("market_p_primary", "p_primary"):
+            prob = getattr(alert, attr, None)
+            if prob is not None:
+                return prob
+    if alert.market_p_yes is not None:
+        return alert.market_p_yes
+    for attr in ("market_p_primary", "p_primary"):
+        prob = getattr(alert, attr, None)
+        if prob is not None:
+            return prob
+    return None
 
 
 def _signed_price_delta(alert: Alert) -> float:
@@ -1109,9 +1531,8 @@ def _descriptor_from_thresholds(value: float, high: float, moderate: float) -> s
     return "Light"
 
 
-def _format_market_link(market_id: str) -> str:
-    safe_id = quote(str(market_id).strip())
-    return f"https://polymarket.com/market/{safe_id}"
+def _format_market_link(market_id: str, slug: str | None = None) -> str:
+    return market_url(market_id, slug)
 
 
 def _sort_copilot_reasons(reasons: list[str]) -> None:
@@ -1180,6 +1601,18 @@ def _get_copilot_daily_count(user_id: UUID, now_ts: datetime) -> int:
         return 0
 
 
+def _get_copilot_theme_ttl(user_id: UUID, theme_key: str) -> int | None:
+    key = COPILOT_THEME_DEDUPE_KEY.format(user_id=user_id, theme_key=theme_key)
+    try:
+        ttl = redis_conn.ttl(key)
+        if ttl is None or ttl < 0:
+            return None
+        return int(ttl)
+    except Exception:
+        logger.exception("copilot_theme_ttl_lookup_failed user_id=%s theme_key=%s", user_id, theme_key)
+        return None
+
+
 def _log_copilot_evaluation(
     config: UserDigestConfig,
     evaluations: list[CopilotThemeEvaluation],
@@ -1226,8 +1659,8 @@ def _log_copilot_evaluation(
     }
     logger.info(
         "copilot_theme_eval user_id=%s plan_name=%s themes_total=%s themes_eligible_count=%s "
-        "daily_count=%s daily_limit=%s sent_this_digest=%s digest_limit=%s cap_reached=%s "
-        "selected_themes=%s themes=%s",
+        "daily_count=%s daily_limit=%s daily_usage=%s sent_this_digest=%s digest_limit=%s digest_usage=%s "
+        "cap_reached=%s selected_themes=%s themes=%s",
         payload["user_id"],
         payload["plan_name"],
         payload["themes_total"],
@@ -1258,10 +1691,17 @@ def _enqueue_ai_recommendations(
     actionable_alerts: list[Alert],
     classifier=None,
     allow_enqueue: bool | None = None,
+    run_id: str | None = None,
+    run_started_at: float | None = None,
+    digest_window_minutes: int | None = None,
+    enqueue_jobs: bool = True,
 ) -> list[CopilotThemeEvaluation]:
     if not actionable_alerts:
         return []
     now_ts = datetime.now(timezone.utc)
+    run_started_at = run_started_at or time.time()
+    if classifier is None:
+        classifier = lambda alert: classify_alert_with_snapshots(db, alert)
     daily_limit = max(config.max_copilot_per_day, 0)
     digest_limit = max(config.max_copilot_per_digest, 1)
     daily_count = _get_copilot_daily_count(config.user_id, now_ts)
@@ -1292,6 +1732,22 @@ def _enqueue_ai_recommendations(
             digest_limit,
             cap_reached_reason,
             selected_theme_keys,
+        )
+        _record_copilot_run(
+            run_id=run_id,
+            run_started_at=run_started_at,
+            config=config,
+            digest_window_minutes=digest_window_minutes,
+            now_ts=now_ts,
+            themes_total=0,
+            themes_candidate=0,
+            themes_eligible=0,
+            themes_selected=0,
+            evaluations=[],
+            daily_count=daily_count,
+            daily_limit=daily_limit,
+            digest_limit=digest_limit,
+            enqueued=0,
         )
         return []
 
@@ -1324,17 +1780,25 @@ def _enqueue_ai_recommendations(
             rep_classification = classifier(rep) if classifier else classify_alert_with_snapshots(db, rep)
         base_reasons: list[str] = []
         if not allow_enqueue:
-            base_reasons.append(CopilotIneligibilityReason.USER_DISABLED.value)
+            if not config.copilot_user_enabled:
+                base_reasons.append(CopilotIneligibilityReason.USER_DISABLED.value)
+            if not config.copilot_plan_enabled:
+                base_reasons.append(CopilotIneligibilityReason.PLAN_DISABLED.value)
         if theme.key in muted_theme_keys or rep.market_id in muted_market_ids:
             base_reasons.append(CopilotIneligibilityReason.MUTED.value)
-        if not _is_within_actionable_pyes(rep, config.p_min, config.p_max):
-            base_reasons.append(CopilotIneligibilityReason.P_OUT_OF_BAND.value)
         if rep_classification.signal_type != "REPRICING":
             base_reasons.append(CopilotIneligibilityReason.NOT_REPRICING.value)
         if rep_classification.confidence != "HIGH":
             base_reasons.append(CopilotIneligibilityReason.CONFIDENCE_NOT_HIGH.value)
         if rep_classification.suggested_action != "FOLLOW":
             base_reasons.append(CopilotIneligibilityReason.NOT_FOLLOW.value)
+
+        decision = _evaluate_delivery_decision(rep, rep_classification, config)
+        if not decision.deliver and decision.reason:
+            if decision.reason == FilterReason.P_OUT_OF_BAND.value:
+                base_reasons.append(CopilotIneligibilityReason.P_OUT_OF_BAND.value)
+            else:
+                base_reasons.append(decision.reason)
 
         reasons = list(base_reasons)
         if reasons:
@@ -1387,6 +1851,22 @@ def _enqueue_ai_recommendations(
             cap_reached_reason,
             selected_theme_keys,
         )
+        _record_copilot_run(
+            run_id=run_id,
+            run_started_at=run_started_at,
+            config=config,
+            digest_window_minutes=digest_window_minutes,
+            now_ts=now_ts,
+            themes_total=actionable_theme_count,
+            themes_candidate=actionable_theme_count,
+            themes_eligible=0,
+            themes_selected=0,
+            evaluations=evaluations,
+            daily_count=daily_count,
+            daily_limit=daily_limit,
+            digest_limit=digest_limit,
+            enqueued=0,
+        )
         return evaluations
 
     ranked = sorted(
@@ -1408,7 +1888,6 @@ def _enqueue_ai_recommendations(
             .all()
         }
 
-    ttl_seconds = max(int(config.copilot_theme_ttl_minutes * 60), 60)
     enqueued = 0
     for idx, theme in enumerate(ranked):
         if remaining_daily <= 0:
@@ -1449,24 +1928,22 @@ def _enqueue_ai_recommendations(
                 CopilotIneligibilityReason.COPILOT_DEDUPE_ACTIVE.value
             )
             continue
-        dedupe_key = COPILOT_THEME_DEDUPE_KEY.format(user_id=config.user_id, theme_key=theme.key)
-        try:
-            marked = redis_conn.set(dedupe_key, now_ts.isoformat(), nx=True, ex=ttl_seconds)
-        except Exception:
-            logger.exception(
-                "copilot_theme_dedupe_failed user_id=%s theme_key=%s",
-                config.user_id,
-                theme.key,
-            )
-            marked = True
-        if not marked:
+        ttl_remaining = _get_copilot_theme_ttl(config.user_id, theme.key)
+        if ttl_remaining:
             evaluations_by_key[theme.key].add_reason(
                 CopilotIneligibilityReason.COPILOT_DEDUPE_ACTIVE.value
             )
+            logger.info(
+                "copilot_theme_skip_dedupe user_id=%s theme_key=%s ttl_remaining=%s dedupe_key=%s scope=theme",
+                config.user_id,
+                theme.key,
+                ttl_remaining,
+                COPILOT_THEME_DEDUPE_KEY.format(user_id=config.user_id, theme_key=theme.key),
+            )
             continue
         selected_theme_keys.append(theme.key)
-        if allow_enqueue:
-            queue.enqueue(ai_recommendation_job, str(config.user_id), alert.id)
+        if allow_enqueue and enqueue_jobs:
+            queue.enqueue(ai_recommendation_job, str(config.user_id), alert.id, run_id)
             enqueued += 1
         sent_this_digest += 1
         remaining_daily -= 1
@@ -1489,7 +1966,163 @@ def _enqueue_ai_recommendations(
         cap_reached_reason,
         selected_theme_keys,
     )
+    _record_copilot_run(
+        run_id=run_id,
+        run_started_at=run_started_at,
+        config=config,
+        digest_window_minutes=digest_window_minutes,
+        now_ts=now_ts,
+        themes_total=actionable_theme_count,
+        themes_candidate=actionable_theme_count,
+        themes_eligible=len(eligible_themes),
+        themes_selected=len(selected_theme_keys),
+        evaluations=evaluations,
+        daily_count=daily_count,
+        daily_limit=daily_limit,
+        digest_limit=digest_limit,
+        enqueued=enqueued,
+    )
     return evaluations
+
+
+def _build_copilot_run_summary(
+    config: UserDigestConfig,
+    now_ts: datetime,
+    digest_window_minutes: int | None,
+    run_id: str | None,
+    themes_total: int,
+    themes_candidate: int,
+    themes_eligible: int,
+    themes_selected: int,
+    skipped_by_reason_counts: dict[str, int],
+    daily_count: int,
+    daily_limit: int,
+    digest_limit: int,
+) -> dict[str, object]:
+    return {
+        "run_id": run_id,
+        "user_id": str(config.user_id),
+        "plan": config.plan_name,
+        "digest_window_minutes": digest_window_minutes or config.digest_window_minutes,
+        "themes_total": themes_total,
+        "themes_candidate": themes_candidate,
+        "themes_eligible": themes_eligible,
+        "themes_selected": themes_selected,
+        "daily_count": daily_count,
+        "daily_limit": daily_limit,
+        "digest_limit": digest_limit,
+        "skipped_by_reason_counts": dict(skipped_by_reason_counts),
+        "created_at": now_ts.isoformat(),
+    }
+
+
+def _emit_copilot_run_summary(
+    run_id: str | None,
+    run_started_at: float | None,
+    config: UserDigestConfig,
+    digest_window_minutes: int,
+    themes_total: int,
+    themes_candidate: int,
+    themes_eligible: int,
+    themes_selected: int,
+    skipped_by_reason_counts: dict[str, int],
+    daily_count: int,
+    daily_limit: int,
+    digest_limit: int,
+    llm_calls_attempted: int,
+    llm_calls_succeeded: int,
+    telegram_sends_attempted: int,
+    telegram_sends_succeeded: int,
+) -> dict[str, object]:
+    summary = _build_copilot_run_summary(
+        config=config,
+        now_ts=datetime.now(timezone.utc),
+        digest_window_minutes=digest_window_minutes,
+        run_id=run_id,
+        themes_total=themes_total,
+        themes_candidate=themes_candidate,
+        themes_eligible=themes_eligible,
+        themes_selected=themes_selected,
+        skipped_by_reason_counts=skipped_by_reason_counts,
+        daily_count=daily_count,
+        daily_limit=daily_limit,
+        digest_limit=digest_limit,
+    )
+    duration_ms = 0
+    if run_started_at:
+        duration_ms = int((time.time() - run_started_at) * 1000)
+    summary.update(
+        {
+            "llm_calls_attempted": llm_calls_attempted,
+            "llm_calls_succeeded": llm_calls_succeeded,
+            "telegram_sends_attempted": telegram_sends_attempted,
+            "telegram_sends_succeeded": telegram_sends_succeeded,
+            "duration_ms": duration_ms,
+        }
+    )
+    log_copilot_run_summary(summary)
+    if telegram_sends_succeeded == 0:
+        store_copilot_last_status(summary)
+    return summary
+
+
+def _record_copilot_run(
+    run_id: str | None,
+    run_started_at: float | None,
+    config: UserDigestConfig,
+    digest_window_minutes: int | None,
+    now_ts: datetime,
+    themes_total: int,
+    themes_candidate: int,
+    themes_eligible: int,
+    themes_selected: int,
+    evaluations: list[CopilotThemeEvaluation],
+    daily_count: int,
+    daily_limit: int,
+    digest_limit: int,
+    enqueued: int,
+) -> None:
+    reason_counts = Counter()
+    for evaluation in evaluations:
+        for reason in evaluation.reasons:
+            reason_counts[reason] += 1
+    if not evaluations and themes_total == 0:
+        reason_counts[COPILOT_RUN_SKIP_NO_ACTIONABLE_THEMES] += 1
+    summary = _build_copilot_run_summary(
+        config=config,
+        now_ts=now_ts,
+        digest_window_minutes=digest_window_minutes,
+        run_id=run_id,
+        themes_total=themes_total,
+        themes_candidate=themes_candidate,
+        themes_eligible=themes_eligible,
+        themes_selected=themes_selected,
+        skipped_by_reason_counts=dict(reason_counts),
+        daily_count=daily_count,
+        daily_limit=daily_limit,
+        digest_limit=digest_limit,
+    )
+    if run_id and enqueued > 0:
+        init_copilot_run(run_id, summary, run_started_at=run_started_at, expected_jobs=enqueued)
+        return
+    _emit_copilot_run_summary(
+        run_id=run_id,
+        run_started_at=run_started_at,
+        config=config,
+        digest_window_minutes=summary["digest_window_minutes"] if isinstance(summary["digest_window_minutes"], int) else config.digest_window_minutes,
+        themes_total=themes_total,
+        themes_candidate=themes_candidate,
+        themes_eligible=themes_eligible,
+        themes_selected=themes_selected,
+        skipped_by_reason_counts=summary["skipped_by_reason_counts"] if isinstance(summary["skipped_by_reason_counts"], dict) else {},
+        daily_count=daily_count,
+        daily_limit=daily_limit,
+        digest_limit=digest_limit,
+        llm_calls_attempted=0,
+        llm_calls_succeeded=0,
+        telegram_sends_attempted=0,
+        telegram_sends_succeeded=0,
+    )
 
 
 def _build_cap_reached_message(

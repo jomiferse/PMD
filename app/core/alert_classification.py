@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 
 from sqlalchemy.orm import Session
 
@@ -7,11 +8,22 @@ from ..models import Alert, MarketSnapshot
 from . import defaults
 
 
+class AlertClass(str, Enum):
+    ACTIONABLE_FAST = "ACTIONABLE_FAST"
+    ACTIONABLE_STANDARD = "ACTIONABLE_STANDARD"
+    INFO_ONLY = "INFO_ONLY"
+
+
 @dataclass(frozen=True)
 class AlertClassification:
     signal_type: str
     confidence: str
     suggested_action: str
+    alert_class: AlertClass | None = None
+    market_kind: str | None = None
+    abs_move: float | None = None
+    pct_move: float | None = None
+    sustained: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -27,6 +39,7 @@ def classify_alert(
 ) -> AlertClassification:
     behavior = _analyze_price_behavior(alert, price_points or [])
     abs_move = _alert_abs_move(alert)
+    pct_move = _alert_pct_move(alert, abs_move)
     large_move = abs_move >= defaults.STRONG_ABS_MOVE_THRESHOLD
     moderate_move = abs_move >= defaults.MEDIUM_ABS_MOVE_THRESHOLD
 
@@ -40,27 +53,117 @@ def classify_alert(
     )
 
     if low_base_price:
-        return AlertClassification("NOISY", "LOW", "IGNORE")
+        return _with_class(
+            AlertClassification(
+                "NOISY",
+                "LOW",
+                "IGNORE",
+                market_kind=getattr(alert, "market_kind", None),
+                abs_move=abs_move,
+                pct_move=pct_move,
+                sustained=behavior.sustained,
+            )
+        )
 
     if behavior.sustained and not behavior.reversal and high_liquidity and high_volume:
-        return AlertClassification("REPRICING", "HIGH", "FOLLOW")
+        return _with_class(
+            AlertClassification(
+                "REPRICING",
+                "HIGH",
+                "FOLLOW",
+                market_kind=getattr(alert, "market_kind", None),
+                abs_move=abs_move,
+                pct_move=pct_move,
+                sustained=behavior.sustained,
+            )
+        )
     if behavior.sustained and not behavior.reversal and large_move and moderate_liquidity and moderate_volume:
-        return AlertClassification("REPRICING", "MEDIUM", "FOLLOW")
+        return _with_class(
+            AlertClassification(
+                "REPRICING",
+                "MEDIUM",
+                "FOLLOW",
+                market_kind=getattr(alert, "market_kind", None),
+                abs_move=abs_move,
+                pct_move=pct_move,
+                sustained=behavior.sustained,
+            )
+        )
 
     if large_move and (behavior.reversal or not behavior.sustained):
         if moderate_liquidity or moderate_volume:
-            return AlertClassification("LIQUIDITY_SWEEP", "MEDIUM", "WAIT")
-        return AlertClassification("NOISY", "LOW", "IGNORE")
+            return _with_class(
+                AlertClassification(
+                    "LIQUIDITY_SWEEP",
+                    "MEDIUM",
+                    "WAIT",
+                    market_kind=getattr(alert, "market_kind", None),
+                    abs_move=abs_move,
+                    pct_move=pct_move,
+                    sustained=behavior.sustained,
+                )
+            )
+        return _with_class(
+            AlertClassification(
+                "NOISY",
+                "LOW",
+                "IGNORE",
+                market_kind=getattr(alert, "market_kind", None),
+                abs_move=abs_move,
+                pct_move=pct_move,
+                sustained=behavior.sustained,
+            )
+        )
 
     if moderate_move and (behavior.reversal or behavior.flatline):
         if moderate_liquidity or moderate_volume:
-            return AlertClassification("LIQUIDITY_SWEEP", "MEDIUM", "WAIT")
-        return AlertClassification("NOISY", "LOW", "IGNORE")
+            return _with_class(
+                AlertClassification(
+                    "LIQUIDITY_SWEEP",
+                    "MEDIUM",
+                    "WAIT",
+                    market_kind=getattr(alert, "market_kind", None),
+                    abs_move=abs_move,
+                    pct_move=pct_move,
+                    sustained=behavior.sustained,
+                )
+            )
+        return _with_class(
+            AlertClassification(
+                "NOISY",
+                "LOW",
+                "IGNORE",
+                market_kind=getattr(alert, "market_kind", None),
+                abs_move=abs_move,
+                pct_move=pct_move,
+                sustained=behavior.sustained,
+            )
+        )
 
     if moderate_move and moderate_liquidity and moderate_volume and behavior.sustained:
-        return AlertClassification("LIQUIDITY_SWEEP", "MEDIUM", "WAIT")
+        return _with_class(
+            AlertClassification(
+                "LIQUIDITY_SWEEP",
+                "MEDIUM",
+                "WAIT",
+                market_kind=getattr(alert, "market_kind", None),
+                abs_move=abs_move,
+                pct_move=pct_move,
+                sustained=behavior.sustained,
+            )
+        )
 
-    return AlertClassification("NOISY", "LOW", "IGNORE")
+    return _with_class(
+        AlertClassification(
+            "NOISY",
+            "LOW",
+            "IGNORE",
+            market_kind=getattr(alert, "market_kind", None),
+            abs_move=abs_move,
+            pct_move=pct_move,
+            sustained=behavior.sustained,
+        )
+    )
 
 
 def classify_alert_with_snapshots(db: Session, alert: Alert) -> AlertClassification:
@@ -74,6 +177,16 @@ def _alert_abs_move(alert: Alert) -> float:
     if alert.delta_pct is not None:
         return abs(alert.delta_pct)
     return abs(alert.move or 0.0)
+
+
+def _alert_pct_move(alert: Alert, abs_move: float) -> float | None:
+    if alert.old_price is not None and alert.old_price > 0:
+        return abs_move / max(alert.old_price, defaults.FLOOR_PRICE)
+    if alert.delta_pct is not None:
+        return abs(alert.delta_pct)
+    if alert.move is not None:
+        return abs(alert.move)
+    return None
 
 
 def _load_price_points(db: Session, alert: Alert, max_points: int = 5) -> list[tuple[datetime, float]]:
@@ -142,3 +255,46 @@ def _analyze_price_behavior(
 
 def _delta_matches(delta: float, direction: int) -> bool:
     return delta * direction > 0 and abs(delta) >= defaults.MEDIUM_ABS_MOVE_THRESHOLD
+
+
+def _with_class(classification: AlertClassification) -> AlertClassification:
+    if classification.alert_class is not None:
+        return classification
+
+    alert_class = _determine_alert_class(
+        classification.signal_type,
+        classification.confidence,
+        market_kind=classification.market_kind,
+        sustained=classification.sustained,
+    )
+    return AlertClassification(
+        classification.signal_type,
+        classification.confidence,
+        classification.suggested_action,
+        alert_class=alert_class,
+        market_kind=classification.market_kind,
+        abs_move=classification.abs_move,
+        pct_move=classification.pct_move,
+        sustained=classification.sustained,
+    )
+
+
+def _determine_alert_class(
+    signal_type: str,
+    confidence: str,
+    market_kind: str | None = None,
+    sustained: bool | None = None,
+) -> AlertClass:
+    normalized_signal = (signal_type or "").upper()
+    normalized_conf = (confidence or "").upper()
+    normalized_kind = (market_kind or "").lower()
+
+    if normalized_signal in {"REPRICING", "LIQUIDITY_SWEEP"} and normalized_conf == "HIGH":
+        return AlertClass.ACTIONABLE_FAST
+    if normalized_signal in {"REPRICING", "LIQUIDITY_SWEEP"}:
+        return AlertClass.ACTIONABLE_STANDARD
+    if normalized_signal == "MOMENTUM" and normalized_conf in {"HIGH", "MEDIUM"}:
+        return AlertClass.ACTIONABLE_STANDARD
+    if normalized_kind in {"range"} and sustained:
+        return AlertClass.ACTIONABLE_STANDARD
+    return AlertClass.INFO_ONLY

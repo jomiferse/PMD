@@ -68,3 +68,13 @@ def test_matchup_spread_label():
     assert extracted.kind == "matchup"
     assert "Spread -7.5" in extracted.short_title
     assert "Spread -7.5" in extracted.theme_label
+
+
+def test_theme_key_differs_for_distinct_matchups_and_assets():
+    matchup_a = extract_theme("Lakers vs Celtics").theme_key
+    matchup_b = extract_theme("Heat vs Celtics").theme_key
+    assert matchup_a != matchup_b
+
+    btc_theme = extract_theme("Will Bitcoin be above $40,000 on January 3?").theme_key
+    eth_theme = extract_theme("Will Ethereum be above $3,000 on January 3?").theme_key
+    assert btc_theme != eth_theme

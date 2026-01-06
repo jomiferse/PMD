@@ -4,7 +4,7 @@ import os
 from datetime import datetime, timezone, timedelta
 
 import redis
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect, text, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -14,6 +14,7 @@ from ..core.scoring import score_market
 from ..core.dislocation import compute_dislocation_alerts
 from ..core.fast_signals import compute_fast_signals
 from ..core.alerts import send_user_digests
+from ..core.market_links import normalize_slug
 from ..settings import settings
 from ..models import MarketSnapshot, Alert
 
@@ -47,6 +48,9 @@ async def run_ingest_and_alert(db: Session) -> dict:
             market_id = _truncate_str(s.market_id, 128)
             title = _truncate_str(s.title, 512)
             category = _truncate_str(s.category, 128)
+            slug = normalize_slug(m.slug)
+            if slug:
+                slug = _truncate_str(slug, 256)
 
             source_ts = m.source_ts or started_at
             bucket = _snapshot_bucket(source_ts)
@@ -56,6 +60,7 @@ async def run_ingest_and_alert(db: Session) -> dict:
                 "market_id": market_id,
                 "title": title,
                 "category": category,
+                "slug": slug,
                 "market_p_yes": s.market_p_yes,
                 "primary_outcome_label": m.primary_outcome_label,
                 "is_yesno": m.is_yesno,
@@ -90,20 +95,10 @@ async def run_ingest_and_alert(db: Session) -> dict:
                 conflict_cols = ["market_id", "asof_ts"]
 
         if snapshot_rows:
-            stmt = pg_insert(MarketSnapshot).values(snapshot_rows)
-            row_keys = set(snapshot_rows[0].keys())
-            update_cols = [col for col in row_keys if col not in conflict_cols]
-            update_set = {col: getattr(stmt.excluded, col) for col in update_cols}
-
-            if update_set:
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=conflict_cols,
-                    set_=update_set,
-                )
-            else:
-                stmt = stmt.on_conflict_do_nothing(index_elements=conflict_cols)
-
+            stmt = _build_snapshot_upsert_stmt(snapshot_rows, conflict_cols)
             db.execute(stmt)
+            if "slug" in snapshot_columns:
+                _backfill_missing_slugs(db, snapshot_rows)
             db.commit()
 
         alert_columns = _table_columns(db, "alerts")
@@ -273,6 +268,39 @@ def run_cleanup(db: Session) -> dict:
     }
 
 
+def _build_snapshot_upsert_stmt(snapshot_rows: list[dict], conflict_cols: list[str]):
+    stmt = pg_insert(MarketSnapshot).values(snapshot_rows)
+    row_keys = set(snapshot_rows[0].keys())
+    update_cols = [col for col in row_keys if col not in conflict_cols]
+    update_set = {col: getattr(stmt.excluded, col) for col in update_cols}
+    if "slug" in row_keys:
+        update_set["slug"] = func.coalesce(stmt.excluded.slug, MarketSnapshot.slug)
+
+    if update_set:
+        stmt = stmt.on_conflict_do_update(
+            index_elements=conflict_cols,
+            set_=update_set,
+        )
+    else:
+        stmt = stmt.on_conflict_do_nothing(index_elements=conflict_cols)
+    return stmt
+
+
+def _backfill_missing_slugs(db: Session, snapshot_rows: list[dict]) -> None:
+    slug_by_market = {row["market_id"]: row.get("slug") for row in snapshot_rows if row.get("slug")}
+    if not slug_by_market:
+        return
+    for market_id, slug in slug_by_market.items():
+        db.execute(
+            text(
+                "UPDATE market_snapshots "
+                "SET slug = :slug "
+                "WHERE market_id = :market_id AND slug IS NULL"
+            ),
+            {"slug": slug, "market_id": market_id},
+        )
+
+
 def _snapshot_bucket(ts: datetime) -> datetime:
     minute = (ts.minute // 5) * 5
     return ts.replace(minute=minute, second=0, microsecond=0)
@@ -317,4 +345,5 @@ OPTIONAL_ALERT_COLUMNS = {
     "strength",
     "mapping_confidence",
     "market_kind",
+    "best_ask",
 }

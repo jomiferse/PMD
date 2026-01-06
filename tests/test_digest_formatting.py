@@ -159,3 +159,32 @@ def test_digest_unknown_mapping_falls_back_to_outcome0():
     )
     assert "p_outcome0" in text
     assert "p_OVER" not in text
+
+
+def test_digest_prefers_slug_in_links():
+    alert = _make_alert(market_id="market-123")
+    alert.market_slug = "human-readable-slug"
+
+    text = _format_digest_message(
+        alerts=[alert],
+        window_minutes=60,
+        total_actionable=1,
+        user_name="Alice",
+    )
+
+    assert "https://polymarket.com/market/human-readable-slug" in text
+    assert "https://polymarket.com/market/market-123" not in text
+
+
+def test_digest_link_falls_back_to_market_id_when_slug_missing():
+    alert = _make_alert(market_id="market-456")
+    alert.market_slug = None
+
+    text = _format_digest_message(
+        alerts=[alert],
+        window_minutes=60,
+        total_actionable=1,
+        user_name="Alice",
+    )
+
+    assert "https://polymarket.com/market/market-456" in text

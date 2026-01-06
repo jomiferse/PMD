@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.core.alert_classification import AlertClassification
+from app.core.alert_classification import AlertClassification, AlertClass
 from app.core.alerts import _enqueue_ai_recommendations, _resolve_user_preferences
 from app.core.plans import get_plan_seeds
 from app.core.user_settings import get_effective_user_settings
@@ -28,6 +28,7 @@ def db_session():
 class FakeRedis:
     def __init__(self):
         self.store = {}
+        self.expirations = {}
 
     def get(self, key):
         return self.store.get(key)
@@ -36,6 +37,24 @@ class FakeRedis:
         if nx and key in self.store:
             return None
         self.store[key] = value
+        if ex is not None:
+            self.expirations[key] = ex
+        return True
+
+    def ttl(self, key):
+        if key not in self.store:
+            return -2
+        return self.expirations.get(key, -1)
+
+    def expire(self, key, ttl):
+        if key not in self.store:
+            return False
+        self.expirations[key] = ttl
+        return True
+
+    def delete(self, key):
+        self.store.pop(key, None)
+        self.expirations.pop(key, None)
         return True
 
 
@@ -84,7 +103,7 @@ def test_basic_plan_disables_copilot(db_session, monkeypatch):
     db_session.add_all([user, alert])
     db_session.commit()
 
-    config = _resolve_user_preferences(user, None)
+    config = _resolve_user_preferences(user, None, db_session)
     assert config.ai_copilot_enabled is False
 
     enqueued = []
@@ -95,7 +114,12 @@ def test_basic_plan_disables_copilot(db_session, monkeypatch):
     )
     monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: enqueued.append(args))
 
-    _enqueue_ai_recommendations(db_session, config, [alert])
+    _enqueue_ai_recommendations(
+        db_session,
+        config,
+        [alert],
+        classifier=lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
+    )
     assert not enqueued
 
 
@@ -107,7 +131,7 @@ def test_pro_plan_daily_cap_respected(db_session, monkeypatch):
     db_session.add_all([user, alert])
     db_session.commit()
 
-    config = _resolve_user_preferences(user, None)
+    config = _resolve_user_preferences(user, None, db_session)
     fake_redis = FakeRedis()
     date_key = datetime.now(timezone.utc).date().isoformat()
     fake_redis.store[f"copilot:count:{user_id}:{date_key}"] = "2"
@@ -116,15 +140,31 @@ def test_pro_plan_daily_cap_respected(db_session, monkeypatch):
         "app.core.alerts.classify_alert_with_snapshots",
         lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
     )
+    monkeypatch.setattr("app.core.alerts._count_snapshot_points", lambda *_args, **_kwargs: 3)
+    monkeypatch.setattr("app.core.alerts._label_mapping_unknown", lambda *_args, **_kwargs: False)
     enqueued = []
     monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: enqueued.append(args))
 
-    _enqueue_ai_recommendations(db_session, config, [alert])
+    _enqueue_ai_recommendations(
+        db_session,
+        config,
+        [alert],
+        classifier=lambda *_args, **_kwargs: AlertClassification(
+            "REPRICING", "HIGH", "FOLLOW", alert_class=AlertClass.ACTIONABLE_STANDARD
+        ),
+    )
     assert len(enqueued) == 1
 
     enqueued.clear()
     fake_redis.store[f"copilot:count:{user_id}:{date_key}"] = "3"
-    _enqueue_ai_recommendations(db_session, config, [alert])
+    _enqueue_ai_recommendations(
+        db_session,
+        config,
+        [alert],
+        classifier=lambda *_args, **_kwargs: AlertClassification(
+            "REPRICING", "HIGH", "FOLLOW", alert_class=AlertClass.ACTIONABLE_STANDARD
+        ),
+    )
     assert not enqueued
 
 
@@ -152,7 +192,7 @@ def test_cap_reached_message_includes_plan_and_limits(db_session, monkeypatch):
     db_session.add_all([user, alert])
     db_session.commit()
 
-    config = _resolve_user_preferences(user, None)
+    config = _resolve_user_preferences(user, None, db_session)
     fake_redis = FakeRedis()
     date_key = datetime.now(timezone.utc).date().isoformat()
     fake_redis.store[f"copilot:count:{user_id}:{date_key}"] = str(config.max_copilot_per_day)
@@ -161,9 +201,18 @@ def test_cap_reached_message_includes_plan_and_limits(db_session, monkeypatch):
         "app.core.alerts.classify_alert_with_snapshots",
         lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
     )
+    monkeypatch.setattr("app.core.alerts._count_snapshot_points", lambda *_args, **_kwargs: 3)
+    monkeypatch.setattr("app.core.alerts._label_mapping_unknown", lambda *_args, **_kwargs: False)
     monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: None)
 
-    _enqueue_ai_recommendations(db_session, config, [alert])
+    _enqueue_ai_recommendations(
+        db_session,
+        config,
+        [alert],
+        classifier=lambda *_args, **_kwargs: AlertClassification(
+            "REPRICING", "HIGH", "FOLLOW", alert_class=AlertClass.ACTIONABLE_STANDARD
+        ),
+    )
     payload = fake_redis.store[f"copilot:last_eval:{user_id}"]
     assert "CAP_REACHED" in payload
     assert f"{config.max_copilot_per_day}/{config.max_copilot_per_day}" in payload

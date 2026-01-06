@@ -102,11 +102,6 @@ Optional:
 - `POLY_LIQUIDITY_MIN` (default unset/None)
 - `POLY_VOLUME_MIN` (default unset/None)
 - `POLY_USE_GLOBAL_MINIMUMS` (default true)
-- `POLY_CLOB_HOST` (default `https://clob.polymarket.com`)
-- `POLY_CHAIN_ID` (default 137)
-- `POLY_SIGNATURE_TYPE` (default 0)
-- `POLY_FUNDER_ADDRESS`
-- `POLY_CREDENTIALS_ENCRYPTION_KEY`
 - `INGEST_INTERVAL_SECONDS` (default 300)
 - `CLEANUP_ENABLED` (default true)
 - `CLEANUP_SCHEDULE_HOUR_UTC` (default 3)
@@ -184,8 +179,10 @@ theme grouping, digests, and Copilot eligibility.
 
 ## Troubleshooting
 
-Why Copilot did not trigger (reason codes in `admin/users/{id}/last-digest`):
+Why Copilot did not trigger (reason codes in `admin/users/{id}/copilot-last-status`):
+Each digest run emits a `copilot_run_summary` log with per-user counts and skip reasons.
 - `USER_DISABLED`: user toggle off
+- `PLAN_DISABLED`: plan disables Copilot
 - `CAP_REACHED`: daily or per-digest cap reached
 - `COPILOT_DEDUPE_ACTIVE`: theme recently sent
 - `MUTED`: market/theme muted
@@ -196,13 +193,23 @@ Why Copilot did not trigger (reason codes in `admin/users/{id}/last-digest`):
 - `P_OUT_OF_BAND`: probability outside user band
 - `INSUFFICIENT_SNAPSHOTS`: not enough snapshots for evidence
 - `MISSING_PRICE_OR_LIQUIDITY`: missing price or liquidity inputs
+- `MISSING_CHAT_ID`: user missing Telegram chat id
+- `NO_ACTIONABLE_THEMES`: no actionable themes in the digest window
+- `NO_ALERTS`: no alerts in the digest window
+- `DIGEST_RECENTLY_SENT`: digest cooldown blocked Copilot
 
 `p_outcome0` means the outcome label mapping was not verified or was unknown.
 `CAP_REACHED` means the daily or per-digest Copilot cap was exhausted and is an upgrade moment.
 
+Copilot debug harness (dry run):
+
+```bash
+docker compose exec api python -m app.scripts.copilot_debug --user-id <uuid> --alert-id <alert_id>
+```
+
 ## Safety
 
-PMD never executes trades. Copilot messages are read-only and return a manual payload only.
+PMD never executes trades. Copilot confirmations are read-only and manual only.
 No custody. No private keys. No execution.
 
 ## Endpoints
@@ -215,6 +222,7 @@ No custody. No private keys. No execution.
 - `GET /status` (auth)
 - `GET /admin/users` (admin)
 - `GET /admin/users/{id}/last-digest` (admin)
+- `GET /admin/users/{id}/copilot-last-status` (admin)
 - `GET /admin/plans` (admin)
 - `POST /admin/plans` (admin)
 - `PATCH /admin/users/{id}/plan` (admin)
