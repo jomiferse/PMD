@@ -1,6 +1,7 @@
 import html
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -22,10 +23,10 @@ from ..models import (
 from ..settings import settings
 from . import defaults
 from .user_settings import get_effective_user_settings
-from ..trading.sizing import DraftUnavailable, compute_draft_size
 from ..llm.client import get_trade_recommendation
 from .alert_classification import classify_alert_with_snapshots
 from .market_links import attach_market_slugs, market_url
+from .signal_speed import SIGNAL_SPEED_FAST, SIGNAL_SPEED_STANDARD
 from .telegram import send_telegram_message, answer_callback_query, edit_message_reply_markup
 
 logger = logging.getLogger(__name__)
@@ -35,25 +36,17 @@ REC_STATUS_PROPOSED = "PROPOSED"
 REC_STATUS_CONFIRMED = "CONFIRMED"
 REC_STATUS_SKIPPED = "SKIPPED"
 REC_STATUS_EXPIRED = "EXPIRED"
-READ_ONLY_DISCLAIMER = "<i>Read-only analytics • Manual execution only • Not financial advice</i>"
-
-RISK_SPENT_KEY = "ai:risk:spent:{user_id}:{date}"
+COPILOT_FOOTER = "<i>Manual execution only. PMD does not place orders.</i>"
 CALLBACK_SEEN_KEY = "ai:telegram:callback:{callback_id}"
 CALLBACK_TTL_SECONDS = 60 * 60 * 24
 COPILOT_THEME_DEDUPE_KEY = "copilot:theme:{user_id}:{theme_key}"
+COPILOT_FAST_THEME_DEDUPE_KEY = "copilot:fast:theme:{user_id}:{theme_key}"
 COPILOT_DAILY_COUNT_KEY = "copilot:count:{user_id}:{date}"
+COPILOT_FAST_DAILY_COUNT_KEY = "copilot:fast:count:{user_id}:{date}"
 COPILOT_RUN_KEY = "copilot:run:{run_id}"
 COPILOT_LAST_STATUS_KEY = "copilot:last_status:{user_id}"
 COPILOT_LAST_STATUS_TTL_SECONDS = 60 * 60 * 24
 COPILOT_RUN_TTL_SECONDS = 60 * 60 * 24
-
-
-@dataclass(frozen=True)
-class DraftOrder:
-    side: str
-    price: float
-    size: float
-    notional_usd: float
 
 
 @dataclass(frozen=True)
@@ -69,10 +62,13 @@ def create_ai_recommendation(
     user: User,
     alert: Alert,
     run_id: str | None = None,
+    signal_speed: str | None = None,
+    window_minutes: int | None = None,
 ) -> AiRecommendation | None:
     now_ts = datetime.now(timezone.utc)
     theme_key = _theme_key_for_alert(alert)
     effective = get_effective_user_settings(user, db=db)
+    signal_speed = signal_speed or SIGNAL_SPEED_STANDARD
     if not effective.copilot_enabled:
         logger.info("ai_rec_skipped copilot_disabled user_id=%s", user.user_id)
         return None
@@ -98,7 +94,12 @@ def create_ai_recommendation(
         else:
             return None
 
-    claim = _claim_copilot_theme(user.user_id, theme_key, effective.copilot_theme_ttl_minutes)
+    claim = _claim_copilot_theme(
+        user.user_id,
+        theme_key,
+        effective.copilot_theme_ttl_minutes,
+        signal_speed=signal_speed,
+    )
     if not claim.claimed:
         logger.info(
             "ai_rec_skipped reason=DEDUPE theme_key=%s ttl_remaining=%s user_id=%s dedupe_key=%s "
@@ -114,14 +115,26 @@ def create_ai_recommendation(
     try:
         classification = classify_alert_with_snapshots(db, alert)
         evidence = _build_evidence(db, alert)
-        llm_context = _build_llm_context(alert, classification, user, effective, evidence)
+        if window_minutes is None:
+            window_minutes = _parse_window_minutes_from_evidence(evidence)
+        llm_context = _build_llm_context(
+            alert,
+            classification,
+            user,
+            effective,
+            evidence,
+            signal_speed=signal_speed,
+            window_minutes=window_minutes,
+        )
         _increment_copilot_run_counter(run_id, "llm_calls_attempted", 1)
         llm_result = get_trade_recommendation(llm_context)
+        llm_result = _apply_fast_recommendation_rules(
+            llm_result,
+            alert,
+            evidence,
+            signal_speed=signal_speed,
+        )
         _increment_copilot_run_counter(run_id, "llm_calls_succeeded", 1)
-
-        draft = None
-        if llm_result["recommendation"] == "BUY":
-            draft = _build_draft(effective, alert, user, theme_key)
 
         recommendation = AiRecommendation(
             user_id=user.user_id,
@@ -130,10 +143,6 @@ def create_ai_recommendation(
             confidence=llm_result["confidence"],
             rationale=llm_result["rationale"],
             risks=llm_result["risks"],
-            draft_side=draft.side if isinstance(draft, DraftOrder) else None,
-            draft_price=draft.price if isinstance(draft, DraftOrder) else None,
-            draft_size=draft.size if isinstance(draft, DraftOrder) else None,
-            draft_notional_usd=draft.notional_usd if isinstance(draft, DraftOrder) else None,
             status=REC_STATUS_PROPOSED,
             expires_at=now_ts + timedelta(minutes=defaults.AI_RECOMMENDATION_EXPIRES_MINUTES),
         )
@@ -156,7 +165,16 @@ def create_ai_recommendation(
                 alert.id,
                 recommendation.rationale[:200],
             )
-        sent = _send_recommendation_message(db, user, alert, recommendation, evidence, run_id=run_id)
+        sent = _send_recommendation_message(
+            db,
+            user,
+            alert,
+            recommendation,
+            evidence,
+            run_id=run_id,
+            signal_speed=signal_speed,
+            window_minutes=window_minutes,
+        )
         if not sent:
             _release_copilot_theme(claim.key, defaults.COPILOT_DEDUPE_FAILURE_TTL_SECONDS)
         return recommendation
@@ -236,13 +254,11 @@ def _handle_confirm_skip(db: Session, rec_id: int, action: str, chat_id: str | N
 
     if action == "confirm":
         if rec.recommendation in {"WAIT", "SKIP"}:
-            return {"ok": False, "reason": "no_draft", "message": "No draft for WAIT/SKIP."}
+            return {"ok": False, "reason": "not_actionable", "message": "Recommendation is not actionable."}
         rec.status = REC_STATUS_CONFIRMED
         db.commit()
         record_ai_event(db, rec, "confirmed", "telegram_confirm")
         logger.info("ai_rec_confirmed rec_id=%s user_id=%s", rec.id, rec.user_id)
-        if rec.draft_notional_usd and rec.user_id:
-            _register_risk_spend(rec.user_id, rec.draft_notional_usd)
         if chat_id:
             _send_confirm_payload(db, str(chat_id), rec)
         return {"ok": True, "message": "Confirmed."}
@@ -330,16 +346,22 @@ def _ensure_aware(value: datetime | None) -> datetime | None:
     return value
 
 
-def _copilot_daily_count_key(user_id: Any, now_ts: datetime) -> str:
+def _copilot_daily_count_key(
+    user_id: Any,
+    now_ts: datetime,
+    signal_speed: str = SIGNAL_SPEED_STANDARD,
+) -> str:
     date_key = now_ts.date().isoformat()
+    if signal_speed == SIGNAL_SPEED_FAST:
+        return COPILOT_FAST_DAILY_COUNT_KEY.format(user_id=user_id, date=date_key)
     return COPILOT_DAILY_COUNT_KEY.format(user_id=user_id, date=date_key)
 
 
-def _increment_copilot_daily_count(user_id: Any) -> None:
+def _increment_copilot_daily_count(user_id: Any, signal_speed: str = SIGNAL_SPEED_STANDARD) -> None:
     if not user_id:
         return
     now_ts = datetime.now(timezone.utc)
-    key = _copilot_daily_count_key(user_id, now_ts)
+    key = _copilot_daily_count_key(user_id, now_ts, signal_speed)
     ttl_seconds = max(int(defaults.COPILOT_DAILY_TTL_SECONDS), 60)
     try:
         redis_conn.incr(key)
@@ -499,22 +521,26 @@ def _send_recommendation_message(
     rec: AiRecommendation,
     evidence: list[str],
     run_id: str | None = None,
+    signal_speed: str = SIGNAL_SPEED_STANDARD,
+    window_minutes: int | None = None,
 ) -> bool:
     if not user.telegram_chat_id:
         return False
-    draft_unavailable = None
-    if rec.recommendation == "BUY" and not _draft_complete(rec):
-        effective = get_effective_user_settings(user, db=db)
-        draft_unavailable = _draft_unavailable_reasons(alert, effective, rec.user_id)
     attach_market_slugs(db, [alert])
-    text, markup = _format_ai_message(alert, rec, evidence, draft_unavailable)
+    text, markup = _format_ai_message(
+        alert,
+        rec,
+        evidence,
+        signal_speed=signal_speed,
+        window_minutes=window_minutes,
+    )
     _increment_copilot_run_counter(run_id, "telegram_sends_attempted", 1)
     response = send_telegram_message(user.telegram_chat_id, text, reply_markup=markup)
     success = bool(response and response.get("ok"))
     message_id = None
     if success:
         message_id = response.get("result", {}).get("message_id")
-        _increment_copilot_daily_count(rec.user_id)
+        _increment_copilot_daily_count(rec.user_id, signal_speed=signal_speed)
         _increment_copilot_run_counter(run_id, "telegram_sends_succeeded", 1)
         if message_id:
             rec.telegram_message_id = str(message_id)
@@ -535,9 +561,6 @@ def _send_confirm_payload(db: Session, chat_id: str, rec: AiRecommendation) -> N
         send_telegram_message(chat_id, "Execution is disabled in this environment.")
         return
     alert = db.query(Alert).filter(Alert.id == rec.alert_id).one_or_none()
-    user = db.query(User).filter(User.user_id == rec.user_id).one_or_none()
-    effective = get_effective_user_settings(user, db=db) if user else None
-    missing = _draft_unavailable_reasons(alert, effective, rec.user_id) if alert else ["missing alert"]
 
     lines = ["<b>Confirmed (manual only).</b>"]
     if alert:
@@ -545,30 +568,9 @@ def _send_confirm_payload(db: Session, chat_id: str, rec: AiRecommendation) -> N
         title = html.escape(alert.title[:160])
         slug = getattr(alert, "market_slug", None)
         slug_text = html.escape(slug) if slug else html.escape(alert.market_id)
-        lines.extend([title, f"Slug: {slug_text}"])
+        lines.extend([title, f"Slug: {slug_text}", "", _format_market_link(alert.market_id, slug)])
 
-        side_label = _format_side_label(alert)
-        amount_parts = []
-        if rec.draft_size and rec.draft_size > 0:
-            amount_parts.append(f"{rec.draft_size:.2f} shares")
-        if rec.draft_price and rec.draft_price > 0:
-            amount_parts.append(f"@ {rec.draft_price:.4f}")
-        if rec.draft_notional_usd and rec.draft_notional_usd > 0:
-            amount_parts.append(f"(~${rec.draft_notional_usd:.2f})")
-        amount_text = " ".join(amount_parts) if amount_parts else "n/a"
-        lines.extend(
-            [
-                f"Suggested side: {side_label}",
-                f"Suggested amount: {amount_text}",
-                "",
-                _format_market_link(alert.market_id, slug),
-            ]
-        )
-    if missing and missing != ["missing alert"]:
-        missing_text = ", ".join(missing)
-        lines.extend(["", f"Draft inputs missing: {html.escape(missing_text)}"])
-
-    lines.extend(["", READ_ONLY_DISCLAIMER])
+    lines.extend(["", COPILOT_FOOTER])
     send_telegram_message(chat_id, "\n".join(lines))
 
 
@@ -576,7 +578,8 @@ def _format_ai_message(
     alert: Alert,
     rec: AiRecommendation,
     evidence: list[str],
-    draft_unavailable: list[str] | None,
+    signal_speed: str = SIGNAL_SPEED_STANDARD,
+    window_minutes: int | None = None,
 ) -> tuple[str, dict[str, Any]]:
     title = html.escape(alert.title[:160])
     p_yes = _format_p_yes(alert)
@@ -584,44 +587,55 @@ def _format_ai_message(
     liq = _format_liquidity(alert)
     evidence_block = _format_evidence_lines(evidence)
     rationale = _format_bullets(rec.rationale)
-    risks = _format_bullets(rec.risks)
+    risk_parts = _split_bullet_text(rec.risks)
+    rationale_header = "<b>Rationale</b>"
+    risks_header = "<b>Risks</b>"
+    what_changes_block = None
+    if rec.recommendation in {"WAIT", "SKIP"}:
+        hold_label = "WAIT" if rec.recommendation == "WAIT" else "SKIP"
+        rationale_header = "<b>Rationale (why not entering now)</b>"
+        risks_header = f"<b>Risks (what could invalidate this {hold_label})</b>"
+        rr_note = _extreme_prob_risk_reward(alert)
+        if rr_note and not any("risk/reward" in part.lower() or "risk reward" in part.lower() for part in risk_parts):
+            risk_parts.append(rr_note)
+        what_changes_block = _format_bullet_parts(_build_wait_change_signals(alert, evidence))
+    risks = _format_bullet_parts(risk_parts)
+
+    display_action = rec.recommendation
+    header = f"<b>AI Copilot: {rec.recommendation} ({rec.confidence})</b>"
+    fast_window = window_minutes
+    if signal_speed == SIGNAL_SPEED_FAST:
+        if fast_window is None:
+            fast_window = _parse_window_minutes_from_evidence(evidence)
+        if fast_window is None:
+            fast_window = 0
+        if rec.recommendation in {"WAIT", "SKIP"}:
+            display_action = "WATCH"
+        header = f"<b>FAST Copilot: {display_action} (Early Signal)</b>"
 
     lines = [
-        f"<b>AI Copilot: {rec.recommendation} ({rec.confidence})</b>",
-        title,
-        f"Move: {move} | {p_yes}",
-        liq,
-        "",
-        "<b>Evidence</b>",
-        evidence_block,
-        "",
-        "<b>Rationale</b>",
-        rationale,
-        "",
-        "<b>Risks</b>",
-        risks,
+        header,
     ]
-
-    if rec.draft_size and rec.draft_price and rec.draft_notional_usd:
-        side_label = _format_side_label(alert)
-        draft_block = (
-            f"token_id: {alert.market_id}\n"
-            f"side_label: {side_label}\n"
-            f"price: {rec.draft_price:.4f}\n"
-            f"size: {rec.draft_size:.2f}\n"
-            f"notional_usd: {rec.draft_notional_usd:.2f}"
-        )
-        lines.extend(["", "<b>Draft order</b>", f"<pre>{html.escape(draft_block)}</pre>"])
-    elif rec.recommendation in {"WAIT", "SKIP"}:
-        lines.extend(["", "<b>Draft order</b>", "Draft not proposed for WAIT/SKIP."])
-    else:
-        lines.append("")
-        lines.append("<b>Draft order</b>")
-        if draft_unavailable:
-            lines.append("Draft size unavailable:")
-            lines.extend([f"- {html.escape(reason)}" for reason in draft_unavailable])
-        else:
-            lines.append("Draft size unavailable.")
+    if signal_speed == SIGNAL_SPEED_FAST:
+        lines.append(f"Early move in last {fast_window}m")
+    lines.extend(
+        [
+            title,
+            f"Move: {move} | {p_yes}",
+            liq,
+            "",
+            "<b>Evidence</b>",
+            evidence_block,
+            "",
+            rationale_header,
+            rationale,
+            "",
+            risks_header,
+            risks,
+        ]
+    )
+    if what_changes_block:
+        lines.extend(["", "<b>What would change this view</b>", what_changes_block])
 
     lines.extend(
         [
@@ -629,7 +643,7 @@ def _format_ai_message(
             _format_market_link(alert.market_id, getattr(alert, "market_slug", None)),
         ]
     )
-    lines.extend(["", READ_ONLY_DISCLAIMER])
+    lines.extend(["", COPILOT_FOOTER])
     keyboard: list[list[dict[str, Any]]] = []
     if rec.recommendation == "BUY":
         keyboard.append(
@@ -664,6 +678,8 @@ def _build_llm_context(
     user: User,
     effective,
     evidence: list[str],
+    signal_speed: str = SIGNAL_SPEED_STANDARD,
+    window_minutes: int | None = None,
 ) -> dict[str, Any]:
     return {
         "user_id": str(user.user_id),
@@ -679,105 +695,11 @@ def _build_llm_context(
         "signal_type": classification.signal_type,
         "confidence": classification.confidence,
         "suggested_action": classification.suggested_action,
-        "risk_budget_usd_per_day": effective.risk_budget_usd_per_day,
-        "max_usd_per_trade": effective.max_usd_per_trade,
-        "max_liquidity_fraction": effective.max_liquidity_fraction,
+        "signal_speed": signal_speed,
+        "window_minutes": window_minutes,
         "no_financial_advice": True,
         "evidence": evidence,
     }
-
-
-def _build_draft(
-    effective,
-    alert: Alert,
-    user: User,
-    theme_key: str,
-) -> DraftOrder | DraftUnavailable:
-    price = _select_draft_price(alert)
-    risk_budget_usd_per_day = effective.risk_budget_usd_per_day
-    max_usd_per_trade = effective.max_usd_per_trade
-    max_liquidity_fraction = effective.max_liquidity_fraction
-    remaining = _risk_budget_remaining(user.user_id, risk_budget_usd_per_day)
-    size = compute_draft_size(
-        risk_budget_usd_per_day=risk_budget_usd_per_day,
-        max_usd_per_trade=max_usd_per_trade,
-        max_liquidity_fraction=max_liquidity_fraction,
-        risk_budget_remaining=remaining,
-        liquidity=alert.liquidity,
-        price=price,
-    )
-    if isinstance(size, DraftUnavailable):
-        logger.info(
-            "ai_draft_sizing user_id=%s theme_key=%s alert_id=%s market_id=%s "
-            "prefs_missing=%s max_usd_per_trade=%s risk_budget_usd_per_day=%s max_liquidity_fraction=%s "
-            "price=%s size=%s notional_usd=%s",
-            user.user_id,
-            theme_key,
-            alert.id,
-            alert.market_id,
-            False,
-            max_usd_per_trade,
-            risk_budget_usd_per_day,
-            max_liquidity_fraction,
-            price,
-            0.0,
-            0.0,
-        )
-        return size
-    logger.info(
-        "ai_draft_sizing user_id=%s theme_key=%s alert_id=%s market_id=%s "
-        "prefs_missing=%s max_usd_per_trade=%s risk_budget_usd_per_day=%s max_liquidity_fraction=%s "
-        "price=%s size=%s notional_usd=%s",
-        user.user_id,
-        theme_key,
-        alert.id,
-        alert.market_id,
-        False,
-        max_usd_per_trade,
-        risk_budget_usd_per_day,
-        max_liquidity_fraction,
-        price,
-        size.size_shares,
-        size.notional_usd,
-    )
-    return DraftOrder(side="YES", price=price, size=size.size_shares, notional_usd=size.notional_usd)
-
-
-def _risk_budget_remaining(user_id: Any, risk_budget_usd_per_day: float) -> float:
-    if risk_budget_usd_per_day <= 0:
-        return 0.0
-    key = RISK_SPENT_KEY.format(user_id=user_id, date=_today_key())
-    try:
-        spent_raw = redis_conn.get(key)
-        spent = float(spent_raw.decode()) if spent_raw else 0.0
-        return max(risk_budget_usd_per_day - spent, 0.0)
-    except Exception:
-        logger.exception("ai_risk_budget_read_failed user_id=%s", user_id)
-        return risk_budget_usd_per_day
-
-
-def _register_risk_spend(user_id: Any, amount: float) -> None:
-    if amount <= 0:
-        return
-    key = RISK_SPENT_KEY.format(user_id=user_id, date=_today_key())
-    ttl_seconds = _seconds_until_end_of_day()
-    try:
-        redis_conn.incrbyfloat(key, amount)
-        if ttl_seconds > 0:
-            redis_conn.expire(key, ttl_seconds)
-    except Exception:
-        logger.exception("ai_risk_budget_write_failed user_id=%s", user_id)
-
-
-def _today_key() -> str:
-    now_ts = datetime.now(timezone.utc)
-    return now_ts.strftime("%Y%m%d")
-
-
-def _seconds_until_end_of_day() -> int:
-    now_ts = datetime.now(timezone.utc)
-    tomorrow = (now_ts + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    return int((tomorrow - now_ts).total_seconds())
 
 
 def record_ai_event(db: Session, rec: AiRecommendation, action: str, details: str | None) -> None:
@@ -839,13 +761,121 @@ def _lookup_user_by_chat(db: Session, chat_id: str | None) -> User | None:
     return rows[0]
 
 
-def _format_bullets(text: str) -> str:
+def _split_bullet_text(text: str) -> list[str]:
     if not text:
-        return "- (none)"
-    parts = [part.strip(" -") for part in text.replace("\n", ";").split(";") if part.strip()]
+        return []
+    return [part.strip(" -") for part in text.replace("\n", ";").split(";") if part.strip()]
+
+
+def _format_bullet_parts(parts: list[str]) -> str:
     if not parts:
         return "- (none)"
     return "\n".join(f"- {html.escape(part)}" for part in parts[:4])
+
+
+def _format_bullets(text: str) -> str:
+    return _format_bullet_parts(_split_bullet_text(text))
+
+
+def _extreme_prob_risk_reward(alert: Alert) -> str | None:
+    p_yes = alert.market_p_yes
+    if p_yes is None:
+        return None
+    if p_yes <= defaults.DEFAULT_P_MIN:
+        return "Risk/reward skewed at low prices: limited upside vs a larger mean-reversion swing."
+    if p_yes >= defaults.DEFAULT_P_MAX:
+        return "Risk/reward skewed at high prices: limited upside vs a larger downside on pullback."
+    return None
+
+
+def _parse_sustained_from_evidence(evidence: list[str]) -> tuple[int | None, int | None]:
+    pattern = re.compile(r"Sustained move across (\d+) snapshots \((\d+)m\)")
+    for line in evidence:
+        match = pattern.search(line)
+        if match:
+            return int(match.group(1)), int(match.group(2))
+    return None, None
+
+
+def _parse_abs_move_from_evidence(evidence: list[str]) -> float | None:
+    pattern = re.compile(r"Abs move: [+-]?([0-9.]+)")
+    for line in evidence:
+        match = pattern.search(line)
+        if match:
+            try:
+                return float(match.group(1))
+            except ValueError:
+                return None
+    return None
+
+
+def _parse_window_minutes_from_evidence(evidence: list[str]) -> int | None:
+    abs_move_pattern = re.compile(r"Abs move: .*?\((\d+)m\)")
+    sustained_pattern = re.compile(r"Sustained move across \d+ snapshots \((\d+)m\)")
+    for line in evidence:
+        match = abs_move_pattern.search(line)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                return None
+    for line in evidence:
+        match = sustained_pattern.search(line)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                return None
+    return None
+
+
+def _fast_buy_allowed(alert: Alert, evidence: list[str]) -> bool:
+    abs_move = _parse_abs_move_from_evidence(evidence) or abs(_signed_price_delta(alert))
+    sustained_snapshots, _ = _parse_sustained_from_evidence(evidence)
+    sustained_count = sustained_snapshots or 0
+    return abs_move >= 0.06 and sustained_count >= 3
+
+
+def _apply_fast_recommendation_rules(
+    llm_result: dict[str, str],
+    alert: Alert,
+    evidence: list[str],
+    signal_speed: str,
+) -> dict[str, str]:
+    if signal_speed != SIGNAL_SPEED_FAST:
+        return llm_result
+    if llm_result.get("recommendation") != "BUY":
+        return llm_result
+    if _fast_buy_allowed(alert, evidence):
+        return llm_result
+    return {
+        "recommendation": "WAIT",
+        "confidence": "MEDIUM",
+        "rationale": "FAST early signal; waiting for follow-through.",
+        "risks": "Move fades quickly or reverses before confirmation.",
+    }
+
+
+def _build_wait_change_signals(alert: Alert, evidence: list[str]) -> list[str]:
+    signals: list[str] = []
+    direction = "up" if _signed_price_delta(alert) >= 0 else "down"
+    liquidity = alert.liquidity or 0.0
+    volume_24h = alert.volume_24h or 0.0
+    sustained_count, _sustained_minutes = _parse_sustained_from_evidence(evidence)
+    if sustained_count is not None and sustained_count < 3:
+        needed = max(3 - sustained_count, 1)
+        signals.append(f"{needed} more snapshot(s) confirm the {direction} move.")
+    if liquidity < defaults.STRONG_MIN_LIQUIDITY:
+        signals.append(f"Liquidity clears ${defaults.STRONG_MIN_LIQUIDITY:,.0f}.")
+    if len(signals) < 2 and volume_24h < defaults.STRONG_MIN_VOLUME_24H:
+        signals.append(f"24h volume clears ${defaults.STRONG_MIN_VOLUME_24H:,.0f}.")
+    if not signals:
+        move_abs = _parse_abs_move_from_evidence(evidence) or abs(_signed_price_delta(alert))
+        if move_abs > 0:
+            signals.append(f"Move extends another {move_abs:.3f} without reversal.")
+        else:
+            signals.append(f"Two consecutive snapshots confirm a {direction} move.")
+    return signals[:2]
 
 
 def _format_p_yes(alert: Alert) -> str:
@@ -904,62 +934,6 @@ def _signed_price_delta(alert: Alert) -> float:
     return alert.move or 0.0
 
 
-def _draft_complete(rec: AiRecommendation) -> bool:
-    if not rec.draft_side:
-        return False
-    if not rec.draft_price or rec.draft_price <= 0:
-        return False
-    if not rec.draft_size or rec.draft_size <= 0:
-        return False
-    if not rec.draft_notional_usd or rec.draft_notional_usd <= 0:
-        return False
-    return True
-
-
-def _draft_unavailable_reasons(
-    alert: Alert | None,
-    effective,
-    user_id: Any,
-) -> list[str]:
-    if not alert:
-        return ["missing alert"]
-    price = _select_draft_price(alert)
-    liquidity = alert.liquidity or 0.0
-    if not effective:
-        reasons = [
-            "max_usd_per_trade is 0 (or missing)",
-            "risk_budget_usd_per_day is 0 (or missing)",
-        ]
-        if price <= 0:
-            reasons.append("missing price")
-        if liquidity <= 0:
-            reasons.append("missing liquidity")
-        return reasons
-    remaining = _risk_budget_remaining(user_id, effective.risk_budget_usd_per_day)
-    result = compute_draft_size(
-        risk_budget_usd_per_day=effective.risk_budget_usd_per_day,
-        max_usd_per_trade=effective.max_usd_per_trade,
-        max_liquidity_fraction=effective.max_liquidity_fraction,
-        risk_budget_remaining=remaining,
-        liquidity=liquidity,
-        price=price,
-    )
-    if isinstance(result, DraftUnavailable):
-        return result.reasons
-    return []
-
-
-def _select_draft_price(alert: Alert) -> float:
-    best_ask = getattr(alert, "best_ask", None)
-    if best_ask and best_ask > 0:
-        return best_ask
-    if alert.market_p_yes and alert.market_p_yes > 0:
-        return alert.market_p_yes
-    if alert.new_price and alert.new_price > 0:
-        return alert.new_price
-    return 0.0
-
-
 def _callback_already_processed(callback_id: str) -> bool:
     key = CALLBACK_SEEN_KEY.format(callback_id=callback_id)
     try:
@@ -970,9 +944,20 @@ def _callback_already_processed(callback_id: str) -> bool:
         return False
 
 
-def _claim_copilot_theme(user_id: Any, theme_key: str, ttl_minutes: int) -> CopilotThemeClaim:
+def _copilot_theme_dedupe_key(user_id: Any, theme_key: str, signal_speed: str) -> str:
+    if signal_speed == SIGNAL_SPEED_FAST:
+        return COPILOT_FAST_THEME_DEDUPE_KEY.format(user_id=user_id, theme_key=theme_key)
+    return COPILOT_THEME_DEDUPE_KEY.format(user_id=user_id, theme_key=theme_key)
+
+
+def _claim_copilot_theme(
+    user_id: Any,
+    theme_key: str,
+    ttl_minutes: int,
+    signal_speed: str = SIGNAL_SPEED_STANDARD,
+) -> CopilotThemeClaim:
     ttl_seconds = max(int(ttl_minutes * 60), 60)
-    key = COPILOT_THEME_DEDUPE_KEY.format(user_id=user_id, theme_key=theme_key)
+    key = _copilot_theme_dedupe_key(user_id, theme_key, signal_speed)
     ttl_remaining: int | None = None
     try:
         marked = redis_conn.set(key, "1", nx=True, ex=ttl_seconds)
@@ -1008,23 +993,6 @@ def _clear_message_actions(chat_id: str | None, message_id: Any) -> None:
     if not chat_id or not message_id:
         return
     edit_message_reply_markup(str(chat_id), str(message_id), {"inline_keyboard": []})
-
-
-def _format_side_label(alert: Alert) -> str:
-    market_kind = getattr(alert, "market_kind", None)
-    is_yesno = getattr(alert, "is_yesno", None)
-    if market_kind == "yesno" or is_yesno is True:
-        return "YES"
-    mapping_confidence = getattr(alert, "mapping_confidence", None)
-    if mapping_confidence != "verified":
-        return "OUTCOME_0"
-    label = getattr(alert, "primary_outcome_label", None)
-    sanitized = _sanitize_outcome_label(label)
-    if sanitized:
-        if sanitized in {"OVER", "UNDER"} and market_kind != "ou":
-            return "OUTCOME_0"
-        return sanitized
-    return "OUTCOME_0"
 
 
 def _format_evidence_lines(evidence: list[str]) -> str:

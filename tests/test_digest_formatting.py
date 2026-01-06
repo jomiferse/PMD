@@ -1,8 +1,10 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.core.alerts import _format_digest_message
 from app.polymarket.client import _parse_markets
-from app.models import Alert
+from app.models import Alert, MarketSnapshot
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 
 def _make_alert(**overrides):
@@ -188,3 +190,59 @@ def test_digest_link_falls_back_to_market_id_when_slug_missing():
     )
 
     assert "https://polymarket.com/market/market-456" in text
+
+
+def test_digest_includes_theme_evidence_line():
+    now_ts = datetime.now(timezone.utc)
+    alert = _make_alert(snapshot_bucket=now_ts, market_id="market-1", old_price=0.4, new_price=0.6)
+
+    engine = create_engine("sqlite:///:memory:", future=True)
+    MarketSnapshot.__table__.create(bind=engine)
+    SessionLocal = sessionmaker(bind=engine)
+    session = SessionLocal()
+    try:
+        snapshots = [
+            MarketSnapshot(
+                market_id="market-1",
+                title="Sample Market",
+                category="testing",
+                market_p_yes=0.4,
+                model_p_yes=0.4,
+                edge=0.0,
+                snapshot_bucket=now_ts - timedelta(minutes=10),
+            ),
+            MarketSnapshot(
+                market_id="market-1",
+                title="Sample Market",
+                category="testing",
+                market_p_yes=0.5,
+                model_p_yes=0.5,
+                edge=0.0,
+                snapshot_bucket=now_ts - timedelta(minutes=5),
+            ),
+            MarketSnapshot(
+                market_id="market-1",
+                title="Sample Market",
+                category="testing",
+                market_p_yes=0.6,
+                model_p_yes=0.6,
+                edge=0.0,
+                snapshot_bucket=now_ts,
+            ),
+        ]
+        session.add_all(snapshots)
+        session.commit()
+
+        text = _format_digest_message(
+            alerts=[alert],
+            window_minutes=15,
+            total_actionable=1,
+            user_name="Alice",
+            db=session,
+            now_ts=now_ts,
+        )
+
+        assert "sustained_snapshots=3" in text
+        assert "reversal_flag=none" in text
+    finally:
+        session.close()

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import httpx
 
 from app.db import SessionLocal
-from app.models import Plan, User, UserAlertPreference, UserPreference
+from app.models import Plan, User, UserAlertPreference
 from app.settings import settings
 from app.core.effective_settings import invalidate_effective_settings_cache
 from app.core.plans import DEFAULT_PLAN_NAME
@@ -55,9 +55,6 @@ def add_user(args: argparse.Namespace) -> None:
         db.add(user)
         db.commit()
         db.refresh(user)
-        pref = UserPreference(user_id=user.user_id, created_at=datetime.now(timezone.utc))
-        db.add(pref)
-        db.commit()
         print(str(user.user_id))
     finally:
         db.close()
@@ -82,13 +79,8 @@ def set_preferences(args: argparse.Namespace) -> None:
         if not pref:
             pref = UserAlertPreference(user_id=user.user_id, created_at=datetime.now(timezone.utc))
             db.add(pref)
-        risk_pref = db.query(UserPreference).filter(UserPreference.user_id == user.user_id).one_or_none()
-        if not risk_pref:
-            risk_pref = UserPreference(user_id=user.user_id, created_at=datetime.now(timezone.utc))
-            db.add(risk_pref)
         overrides = _load_overrides(user)
         overrides_updated = False
-        risk_updated = False
 
         if args.min_liquidity is not None:
             pref.min_liquidity = args.min_liquidity
@@ -114,21 +106,6 @@ def set_preferences(args: argparse.Namespace) -> None:
             pref.p_max = args.p_max
         if args.ai_copilot_enabled is not None:
             user.copilot_enabled = args.ai_copilot_enabled
-        if args.risk_budget_usd_per_day is not None:
-            risk_pref.risk_budget_usd_per_day = args.risk_budget_usd_per_day
-            overrides.pop("risk_budget_usd_per_day", None)
-            overrides_updated = True
-            risk_updated = True
-        if args.max_usd_per_trade is not None:
-            risk_pref.max_usd_per_trade = args.max_usd_per_trade
-            overrides.pop("max_usd_per_trade", None)
-            overrides_updated = True
-            risk_updated = True
-        if args.max_liquidity_fraction is not None:
-            risk_pref.max_liquidity_fraction = args.max_liquidity_fraction
-            overrides.pop("max_liquidity_fraction", None)
-            overrides_updated = True
-            risk_updated = True
         if args.fast_signals_enabled is not None:
             pref.fast_signals_enabled = args.fast_signals_enabled
             overrides["fast_signals_enabled"] = args.fast_signals_enabled
@@ -142,9 +119,6 @@ def set_preferences(args: argparse.Namespace) -> None:
 
         if overrides_updated:
             user.overrides_json = overrides
-        if risk_updated:
-            risk_pref.updated_at = datetime.now(timezone.utc)
-
         db.commit()
         invalidate_effective_settings_cache(user.user_id)
         print(f"updated preferences for {user.user_id}")
@@ -218,9 +192,6 @@ def build_parser() -> argparse.ArgumentParser:
     pref.add_argument("--p-min", type=float)
     pref.add_argument("--p-max", type=float)
     pref.add_argument("--ai-copilot-enabled", type=_parse_bool)
-    pref.add_argument("--risk-budget-usd-per-day", type=float)
-    pref.add_argument("--max-usd-per-trade", type=float)
-    pref.add_argument("--max-liquidity-fraction", type=float)
     pref.add_argument("--fast-signals-enabled", type=_parse_bool)
     pref.add_argument("--fast-window-minutes", type=int)
     pref.add_argument("--fast-max-themes-per-digest", type=int)

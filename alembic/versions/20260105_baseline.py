@@ -88,27 +88,6 @@ def upgrade() -> None:
     )
 
     op.create_table(
-        "user_preferences",
-        sa.Column(
-            "user_id",
-            postgresql.UUID(as_uuid=True),
-            sa.ForeignKey("users.user_id", ondelete="CASCADE"),
-            primary_key=True,
-        ),
-        sa.Column("risk_budget_usd_per_day", sa.Numeric(), nullable=False, server_default="0"),
-        sa.Column("max_usd_per_trade", sa.Numeric(), nullable=False, server_default="0"),
-        sa.Column("max_liquidity_fraction", sa.Numeric(), nullable=False, server_default="0.01"),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            nullable=False,
-            server_default=sa.func.now(),
-            onupdate=sa.func.now(),
-        ),
-    )
-
-    op.create_table(
         "market_snapshots",
         sa.Column("id", sa.Integer(), primary_key=True),
         sa.Column("market_id", sa.String(length=128), nullable=False),
@@ -258,10 +237,6 @@ def upgrade() -> None:
         sa.Column("confidence", sa.String(length=8), nullable=False),
         sa.Column("rationale", sa.Text(), nullable=False),
         sa.Column("risks", sa.Text(), nullable=False),
-        sa.Column("draft_side", sa.String(length=8), nullable=True),
-        sa.Column("draft_price", sa.Float(), nullable=True),
-        sa.Column("draft_size", sa.Float(), nullable=True),
-        sa.Column("draft_notional_usd", sa.Float(), nullable=True),
         sa.Column("status", sa.String(length=16), nullable=False, default="PROPOSED"),
         sa.Column("telegram_message_id", sa.String(length=64), nullable=True),
         sa.Column("expires_at", sa.DateTime(), nullable=True),
@@ -340,24 +315,7 @@ def upgrade() -> None:
         ["user_id", "created_at"],
     )
 
-    op.create_table(
-        "user_polymarket_credentials",
-        sa.Column("id", sa.Integer(), primary_key=True),
-        sa.Column(
-            "user_id",
-            postgresql.UUID(as_uuid=True),
-            sa.ForeignKey("users.user_id", ondelete="CASCADE"),
-            nullable=False,
-        ),
-        sa.Column("encrypted_payload", sa.Text(), nullable=False),
-        sa.Column("created_at", sa.DateTime(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(), nullable=False),
-        sa.UniqueConstraint("user_id", name="uq_user_polymarket_credentials_user"),
-    )
-
-
 def downgrade() -> None:
-    op.drop_table("user_polymarket_credentials")
     op.drop_table("ai_recommendation_events")
     op.drop_index("ix_ai_theme_mutes_expires_at", table_name="ai_theme_mutes")
     op.drop_table("ai_theme_mutes")
@@ -382,7 +340,6 @@ def downgrade() -> None:
     op.drop_index("ix_market_snapshots_bucket", table_name="market_snapshots")
     op.drop_index("ix_market_snapshots_market_id", table_name="market_snapshots")
     op.drop_table("market_snapshots")
-    op.drop_table("user_preferences")
     op.drop_table("user_alert_preferences")
     op.drop_table("users")
     op.drop_table("plans")

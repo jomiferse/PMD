@@ -108,9 +108,6 @@ def _make_config(user_id):
         ai_copilot_enabled=True,
         copilot_user_enabled=True,
         copilot_plan_enabled=True,
-        risk_budget_usd_per_day=100.0,
-        max_usd_per_trade=20.0,
-        max_liquidity_fraction=0.01,
         fast_signals_enabled=False,
         fast_window_minutes=defaults.DEFAULT_FAST_WINDOW_MINUTES,
         fast_max_themes_per_digest=defaults.DEFAULT_FAST_MAX_THEMES_PER_DIGEST,
@@ -125,6 +122,7 @@ def _make_config(user_id):
         allow_fast_alerts=True,
         plan_name="default",
         max_copilot_per_day=5,
+        max_fast_copilot_per_day=5,
         max_copilot_per_digest=1,
         copilot_theme_ttl_minutes=360,
         max_themes_per_digest=5,
@@ -164,11 +162,7 @@ def test_copilot_daily_count_increments_on_success(db_session, monkeypatch):
         user_id=uuid4(),
         name="Trader",
         telegram_chat_id="123",
-        overrides_json={
-            "risk_budget_usd_per_day": 100.0,
-            "max_usd_per_trade": 50.0,
-            "max_liquidity_fraction": 0.01,
-        },
+        overrides_json={},
     )
     alert = _make_alert()
     db_session.add_all([user, alert])
@@ -211,11 +205,7 @@ def test_copilot_daily_count_skips_on_failure(db_session, monkeypatch):
         user_id=uuid4(),
         name="Trader",
         telegram_chat_id="123",
-        overrides_json={
-            "risk_budget_usd_per_day": 100.0,
-            "max_usd_per_trade": 50.0,
-            "max_liquidity_fraction": 0.01,
-        },
+        overrides_json={},
     )
     alert = _make_alert()
     db_session.add_all([user, alert])
@@ -339,11 +329,7 @@ def test_copilot_daily_key_is_date_scoped(db_session, monkeypatch):
         user_id=uuid4(),
         name="Trader",
         telegram_chat_id="123",
-        overrides_json={
-            "risk_budget_usd_per_day": 100.0,
-            "max_usd_per_trade": 50.0,
-            "max_liquidity_fraction": 0.01,
-        },
+        overrides_json={},
     )
     alert = _make_alert()
     db_session.add_all([user, alert])

@@ -21,11 +21,9 @@ from .models import (
     Plan,
     User,
     UserAlertPreference,
-    UserPreference,
 )
 from .rate_limit import rate_limit
 from .settings import settings
-from .core import defaults
 from .core.alerts import USER_DIGEST_LAST_PAYLOAD_KEY
 from .core.alert_classification import classify_alert_with_snapshots
 from .core.ai_copilot import COPILOT_LAST_STATUS_KEY, COPILOT_THEME_DEDUPE_KEY, handle_telegram_callback
@@ -176,9 +174,8 @@ def admin_users(
     _=Depends(admin_key_auth),
 ):
     rows = (
-        db.query(User, UserAlertPreference, UserPreference)
+        db.query(User, UserAlertPreference)
         .outerjoin(UserAlertPreference, User.user_id == UserAlertPreference.user_id)
-        .outerjoin(UserPreference, User.user_id == UserPreference.user_id)
         .order_by(User.created_at.desc())
         .all()
     )
@@ -201,24 +198,14 @@ def admin_users(
                 "p_min": pref.p_min if pref else None,
                 "p_max": pref.p_max if pref else None,
                 "ai_copilot_enabled": user.copilot_enabled,
-                "risk_budget_usd_per_day": (
-                    float(user_pref.risk_budget_usd_per_day) if user_pref else defaults.DEFAULT_RISK_BUDGET_USD_PER_DAY
-                ),
-                "max_usd_per_trade": (
-                    float(user_pref.max_usd_per_trade) if user_pref else defaults.DEFAULT_MAX_USD_PER_TRADE
-                ),
-                "max_liquidity_fraction": (
-                    float(user_pref.max_liquidity_fraction) if user_pref else defaults.DEFAULT_MAX_LIQUIDITY_FRACTION
-                ),
                 "fast_signals_enabled": pref.fast_signals_enabled if pref else None,
                 "fast_window_minutes": pref.fast_window_minutes if pref else None,
                 "fast_max_themes_per_digest": pref.fast_max_themes_per_digest if pref else None,
                 "fast_max_markets_per_theme": pref.fast_max_markets_per_theme if pref else None,
                 "created_at": pref.created_at.isoformat() if pref else None,
-                "risk_updated_at": user_pref.updated_at.isoformat() if user_pref else None,
             },
         }
-        for user, pref, user_pref in rows
+        for user, pref in rows
     ]
 
 
@@ -296,6 +283,7 @@ def admin_plans(
             "is_active": plan.is_active,
             "copilot_enabled": plan.copilot_enabled,
             "max_copilot_per_day": plan.max_copilot_per_day,
+            "max_fast_copilot_per_day": plan.max_fast_copilot_per_day,
             "max_copilot_per_digest": plan.max_copilot_per_digest,
             "copilot_theme_ttl_minutes": plan.copilot_theme_ttl_minutes,
             "fast_signals_enabled": plan.fast_signals_enabled,
@@ -347,6 +335,7 @@ async def admin_upsert_plan(
         "is_active",
         "copilot_enabled",
         "max_copilot_per_day",
+        "max_fast_copilot_per_day",
         "max_copilot_per_digest",
         "copilot_theme_ttl_minutes",
         "fast_signals_enabled",
@@ -435,6 +424,7 @@ def admin_user_effective_settings(
         "plan_name": effective.plan_name,
         "copilot_enabled": effective.copilot_enabled,
         "max_copilot_per_day": effective.max_copilot_per_day,
+        "max_fast_copilot_per_day": effective.max_fast_copilot_per_day,
         "max_copilot_per_digest": effective.max_copilot_per_digest,
         "copilot_theme_ttl_minutes": effective.copilot_theme_ttl_minutes,
         "fast_signals_enabled": effective.fast_signals_enabled,
@@ -451,107 +441,7 @@ def admin_user_effective_settings(
         "p_min": effective.p_min,
         "p_max": effective.p_max,
         "allowed_strengths": sorted(effective.allowed_strengths),
-        "risk_budget_usd_per_day": effective.risk_budget_usd_per_day,
-        "max_usd_per_trade": effective.max_usd_per_trade,
-        "max_liquidity_fraction": effective.max_liquidity_fraction,
         "overrides_json": user.overrides_json,
-    }
-
-
-@app.get("/admin/users/{user_id}/preferences")
-def admin_get_user_preferences(
-    user_id: str,
-    db: Session = Depends(get_db),
-    _=Depends(admin_key_auth),
-):
-    parsed_user_id = user_id
-    if isinstance(user_id, str):
-        try:
-            parsed_user_id = uuid.UUID(user_id)
-        except ValueError:
-            return {"user_id": user_id, "error": "invalid_user_id"}
-    user = db.query(User).filter(User.user_id == parsed_user_id).one_or_none()
-    if not user:
-        return {"user_id": user_id, "error": "user_not_found"}
-
-    pref = (
-        db.query(UserPreference)
-        .filter(UserPreference.user_id == user.user_id)
-        .one_or_none()
-    )
-    if pref is None:
-        pref = UserPreference(
-            user_id=user.user_id,
-            risk_budget_usd_per_day=defaults.DEFAULT_RISK_BUDGET_USD_PER_DAY,
-            max_usd_per_trade=defaults.DEFAULT_MAX_USD_PER_TRADE,
-            max_liquidity_fraction=defaults.DEFAULT_MAX_LIQUIDITY_FRACTION,
-            created_at=datetime.now(timezone.utc),
-            updated_at=datetime.now(timezone.utc),
-        )
-        db.add(pref)
-        db.commit()
-        db.refresh(pref)
-
-    return {
-        "user_id": str(user.user_id),
-        "risk_budget_usd_per_day": float(pref.risk_budget_usd_per_day or 0.0),
-        "max_usd_per_trade": float(pref.max_usd_per_trade or 0.0),
-        "max_liquidity_fraction": float(pref.max_liquidity_fraction or 0.0),
-        "created_at": pref.created_at.isoformat() if pref.created_at else None,
-        "updated_at": pref.updated_at.isoformat() if pref.updated_at else None,
-    }
-
-
-@app.patch("/admin/users/{user_id}/preferences")
-async def admin_update_user_preferences(
-    user_id: str,
-    request: Request,
-    db: Session = Depends(get_db),
-    _=Depends(admin_key_auth),
-):
-    parsed_user_id = user_id
-    if isinstance(user_id, str):
-        try:
-            parsed_user_id = uuid.UUID(user_id)
-        except ValueError:
-            return {"user_id": user_id, "error": "invalid_user_id"}
-    user = db.query(User).filter(User.user_id == parsed_user_id).one_or_none()
-    if not user:
-        return {"user_id": user_id, "error": "user_not_found"}
-
-    payload = await request.json()
-    pref = (
-        db.query(UserPreference)
-        .filter(UserPreference.user_id == user.user_id)
-        .one_or_none()
-    )
-    if pref is None:
-        pref = UserPreference(user_id=user.user_id, created_at=datetime.now(timezone.utc))
-        db.add(pref)
-
-    updated = False
-    for key in ("risk_budget_usd_per_day", "max_usd_per_trade", "max_liquidity_fraction"):
-        if key in payload and payload[key] is not None:
-            try:
-                value = float(payload[key])
-            except (TypeError, ValueError):
-                continue
-            setattr(pref, key, value)
-            updated = True
-    if updated:
-        pref.updated_at = datetime.now(timezone.utc)
-    db.commit()
-    invalidate_effective_settings_cache(user.user_id)
-    db.refresh(pref)
-    return {
-        "ok": True,
-        "user_id": str(user.user_id),
-        "preferences": {
-            "risk_budget_usd_per_day": float(pref.risk_budget_usd_per_day or 0.0),
-            "max_usd_per_trade": float(pref.max_usd_per_trade or 0.0),
-            "max_liquidity_fraction": float(pref.max_liquidity_fraction or 0.0),
-            "updated_at": pref.updated_at.isoformat() if pref.updated_at else None,
-        },
     }
 
 
@@ -589,10 +479,6 @@ def admin_ai_recommendations(
             "confidence": rec.confidence,
             "rationale": rec.rationale,
             "risks": rec.risks,
-            "draft_side": rec.draft_side,
-            "draft_price": rec.draft_price,
-            "draft_size": rec.draft_size,
-            "draft_notional_usd": rec.draft_notional_usd,
             "status": rec.status,
             "telegram_message_id": rec.telegram_message_id,
             "expires_at": rec.expires_at.isoformat() if rec.expires_at else None,

@@ -105,6 +105,7 @@ class Plan(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     copilot_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     max_copilot_per_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_fast_copilot_per_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_copilot_per_digest: Mapped[int | None] = mapped_column(Integer, nullable=True)
     copilot_theme_ttl_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     fast_signals_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
@@ -167,26 +168,6 @@ class UserAlertPreference(Base):
     created_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), nullable=False)
 
 
-class UserPreference(Base):
-    __tablename__ = "user_preferences"
-
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("users.user_id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-    risk_budget_usd_per_day: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
-    max_usd_per_trade: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
-    max_liquidity_fraction: Mapped[float] = mapped_column(Float, default=0.01, nullable=False)
-    created_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), nullable=False)
-    updated_at: Mapped[DateTime] = mapped_column(
-        DateTime,
-        default=func.now(),
-        onupdate=func.now(),
-        nullable=False,
-    )
-
-
 class AlertDelivery(Base):
     __tablename__ = "alert_deliveries"
     __table_args__ = (
@@ -230,10 +211,6 @@ class AiRecommendation(Base):
     confidence: Mapped[str] = mapped_column(String(8), nullable=False)
     rationale: Mapped[str] = mapped_column(Text, nullable=False)
     risks: Mapped[str] = mapped_column(Text, nullable=False)
-    draft_side: Mapped[str | None] = mapped_column(String(8), nullable=True)
-    draft_price: Mapped[float | None] = mapped_column(Float, nullable=True)
-    draft_size: Mapped[float | None] = mapped_column(Float, nullable=True)
-    draft_notional_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="PROPOSED", nullable=False)
     telegram_message_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     expires_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
@@ -299,24 +276,3 @@ class AiRecommendationEvent(Base):
     details: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     created_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), nullable=False)
 
-
-class UserPolymarketCredential(Base):
-    __tablename__ = "user_polymarket_credentials"
-    __table_args__ = (
-        UniqueConstraint("user_id", name="uq_user_polymarket_credentials_user"),
-    )
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("users.user_id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    encrypted_payload: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), nullable=False)
-    updated_at: Mapped[DateTime] = mapped_column(
-        DateTime,
-        default=func.now(),
-        onupdate=func.now(),
-        nullable=False,
-    )

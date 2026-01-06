@@ -7,8 +7,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.alerts.theme_key import extract_theme
 from app.core import defaults
-from app.core.ai_copilot import _build_draft, create_ai_recommendation
-from app.core.user_settings import get_effective_user_settings
+from app.core.ai_copilot import create_ai_recommendation
 from app.db import Base
 from app.models import Alert, User
 
@@ -126,28 +125,6 @@ def test_copilot_dedupe_skips_llm(db_session, monkeypatch):
     assert result is None
 
 
-def test_build_draft_uses_pref_values(db_session, monkeypatch):
-    user = User(
-        user_id=uuid4(),
-        name="Trader",
-        telegram_chat_id="123",
-        overrides_json={
-            "risk_budget_usd_per_day": 100.0,
-            "max_usd_per_trade": 50.0,
-            "max_liquidity_fraction": 0.01,
-        },
-    )
-    alert = _make_alert(best_ask=0.5, liquidity=10000.0)
-    db_session.add_all([user, alert])
-    db_session.commit()
-
-    monkeypatch.setattr("app.core.ai_copilot.redis_conn", FakeRedis())
-    effective = get_effective_user_settings(user)
-    draft = _build_draft(effective, alert, user, "bitcoin-2026")
-    assert draft.notional_usd == 50.0
-    assert draft.size == 100.0
-
-
 class _StubClassification:
     signal_type = "REPRICING"
     confidence = "HIGH"
@@ -170,9 +147,6 @@ def test_copilot_theme_dedupe_ttl_respected(db_session, monkeypatch):
         telegram_chat_id="123",
         copilot_enabled=True,
         overrides_json={
-            "risk_budget_usd_per_day": 100.0,
-            "max_usd_per_trade": 50.0,
-            "max_liquidity_fraction": 0.01,
             "copilot_theme_ttl_minutes": 1,
         },
     )
@@ -229,9 +203,6 @@ def test_copilot_dedupe_shortens_on_send_failure(db_session, monkeypatch):
         telegram_chat_id="123",
         copilot_enabled=True,
         overrides_json={
-            "risk_budget_usd_per_day": 100.0,
-            "max_usd_per_trade": 50.0,
-            "max_liquidity_fraction": 0.01,
             "copilot_theme_ttl_minutes": 1,
         },
     )

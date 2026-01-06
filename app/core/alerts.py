@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 import httpx
 import redis
 from rq import Queue
+from sqlalchemy import inspect
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -37,11 +38,12 @@ from .alert_classification import AlertClass, AlertClassification, classify_aler
 from .fast_signals import FAST_ALERT_TYPE
 from .market_links import attach_market_slugs, market_url
 from .plans import upgrade_target_name
+from .signal_speed import SIGNAL_SPEED_FAST, SIGNAL_SPEED_STANDARD, classify_signal_speed
 
 logger = logging.getLogger(__name__)
 redis_conn = redis.from_url(settings.REDIS_URL)
 queue = Queue("default", connection=redis_conn)
-READ_ONLY_DISCLAIMER = "<i>Read-only analytics • Manual execution only • Not financial advice</i>"
+READ_ONLY_DISCLAIMER = "<i>Read-only analytics - Manual execution only - Not financial advice</i>"
 
 USER_DIGEST_LAST_SENT_KEY = "alerts:digest:last_sent:user:{user_id}"
 USER_DIGEST_LAST_PAYLOAD_KEY = "alerts:last_digest:user:{user_id}"
@@ -49,8 +51,10 @@ TENANT_DIGEST_LAST_PAYLOAD_KEY = "alerts:last_digest:{tenant_id}"
 USER_FAST_DIGEST_LAST_SENT_KEY = "alerts:fast:last_sent:user:{user_id}"
 DIGEST_SENT_FINGERPRINT_KEY = "digest:sent:{user_id}:{fingerprint_hash}"
 COPILOT_THEME_DEDUPE_KEY = "copilot:theme:{user_id}:{theme_key}"
+COPILOT_FAST_THEME_DEDUPE_KEY = "copilot:fast:theme:{user_id}:{theme_key}"
 COPILOT_LAST_EVAL_KEY = "copilot:last_eval:{user_id}"
 COPILOT_DAILY_COUNT_KEY = "copilot:count:{user_id}:{date}"
+COPILOT_FAST_DAILY_COUNT_KEY = "copilot:fast:count:{user_id}:{date}"
 COPILOT_LAST_EVAL_TTL_SECONDS = 60 * 60 * 24
 
 DELIVERY_STATUS_SENT = "sent"
@@ -72,9 +76,6 @@ class UserDigestConfig:
     ai_copilot_enabled: bool
     copilot_user_enabled: bool
     copilot_plan_enabled: bool
-    risk_budget_usd_per_day: float
-    max_usd_per_trade: float
-    max_liquidity_fraction: float
     fast_signals_enabled: bool
     fast_window_minutes: int
     fast_max_themes_per_digest: int
@@ -83,6 +84,7 @@ class UserDigestConfig:
     p_max: float
     plan_name: str | None
     max_copilot_per_day: int
+    max_fast_copilot_per_day: int
     max_copilot_per_digest: int
     copilot_theme_ttl_minutes: int
     max_themes_per_digest: int
@@ -102,6 +104,7 @@ class Theme:
     alerts: list[Alert]
     representative: Alert
     representative_classification: AlertClassification | None = None
+    signal_speed: str | None = None
     tokens: set[str] = field(default_factory=set, repr=False)
 
 
@@ -181,6 +184,7 @@ COPILOT_RUN_SKIP_RECENT_DIGEST = "DIGEST_RECENTLY_SENT"
 class CopilotThemeEvaluation:
     theme_key: str
     market_id: str | None
+    signal_speed: str
     reasons: list[str]
 
     def add_reason(self, reason: str) -> None:
@@ -266,9 +270,6 @@ def _resolve_user_preferences(
     digest_window_minutes = effective.digest_window_minutes
     max_alerts_per_digest = effective.max_alerts_per_digest
     ai_copilot_enabled = effective.copilot_enabled
-    risk_budget_usd_per_day = effective.risk_budget_usd_per_day
-    max_usd_per_trade = effective.max_usd_per_trade
-    max_liquidity_fraction = effective.max_liquidity_fraction
     fast_signals_enabled = effective.fast_signals_enabled
     return UserDigestConfig(
         user_id=user.user_id,
@@ -283,9 +284,6 @@ def _resolve_user_preferences(
         ai_copilot_enabled=ai_copilot_enabled,
         copilot_user_enabled=user_copilot_enabled,
         copilot_plan_enabled=plan_copilot_enabled,
-        risk_budget_usd_per_day=risk_budget_usd_per_day,
-        max_usd_per_trade=max_usd_per_trade,
-        max_liquidity_fraction=max_liquidity_fraction,
         fast_signals_enabled=fast_signals_enabled,
         fast_window_minutes=max(int(effective.fast_window_minutes), 1),
         fast_max_themes_per_digest=max(int(effective.fast_max_themes_per_digest), 1),
@@ -300,6 +298,7 @@ def _resolve_user_preferences(
         allow_fast_alerts=bool(effective.allow_fast_alerts),
         plan_name=effective.plan_name,
         max_copilot_per_day=max(int(effective.max_copilot_per_day), 0),
+        max_fast_copilot_per_day=max(int(effective.max_fast_copilot_per_day), 0),
         max_copilot_per_digest=max(int(effective.max_copilot_per_digest), 1),
         copilot_theme_ttl_minutes=max(int(effective.copilot_theme_ttl_minutes), 1),
         max_themes_per_digest=max(int(effective.max_themes_per_digest), 1),
@@ -595,6 +594,8 @@ async def _send_user_digest(
         max_themes_per_digest=config.max_themes_per_digest,
         max_markets_per_theme=config.max_markets_per_theme,
         classifier=classifier,
+        db=db,
+        now_ts=now_ts,
     )
     if not text:
         _record_alert_deliveries(
@@ -1104,6 +1105,8 @@ def _format_digest_message(
     max_themes_per_digest: int | None = None,
     max_markets_per_theme: int | None = None,
     classifier=None,
+    db: Session | None = None,
+    now_ts: datetime | None = None,
 ) -> str:
     if not alerts:
         return ""
@@ -1121,6 +1124,8 @@ def _format_digest_message(
             max_themes_per_digest,
             max_markets_per_theme,
             classifier,
+            db=db,
+            now_ts=now_ts,
         )
 
     header_label = f"{actionable_included} actionable repricings" if actionable_included else f"{len(alerts)} signals"
@@ -1218,12 +1223,18 @@ def _format_grouped_digest_message(
     max_themes_per_digest: int | None = None,
     max_markets_per_theme: int | None = None,
     classifier=None,
+    db: Session | None = None,
+    now_ts: datetime | None = None,
 ) -> str:
     themes = group_alerts_into_themes(alerts, classifier)
     max_themes = max(max_themes_per_digest or defaults.DEFAULT_MAX_THEMES_PER_DIGEST, 1)
     themes = themes[:max_themes]
     header = f"<b>PMD - {len(themes)} theme{'' if len(themes) == 1 else 's'} ({window_minutes}m)</b>"
     lines = [header, ""]
+    evidence_by_market: dict[str, str] = {}
+    if db is not None and now_ts is not None and _db_has_table(db, MarketSnapshot.__tablename__):
+        window_start = now_ts - timedelta(minutes=window_minutes)
+        evidence_by_market = _build_theme_digest_evidence(db, themes, window_start, now_ts)
 
     for idx, theme in enumerate(themes, start=1):
         label = html.escape(theme.label)
@@ -1238,6 +1249,9 @@ def _format_grouped_digest_message(
         lines.append(
             f"Rep: {rep_title} | Move {rep_move} | {rep_p_yes} | Liq {rep_liq} | Vol {rep_vol}"
         )
+        evidence_line = evidence_by_market.get(rep.market_id)
+        if evidence_line:
+            lines.append(evidence_line)
         related = [alert for alert in theme.alerts if alert is not rep]
         max_markets = max_markets_per_theme or defaults.DEFAULT_MAX_MARKETS_PER_THEME
         for related_alert in related[: max(int(max_markets), 1)]:
@@ -1250,6 +1264,105 @@ def _format_grouped_digest_message(
 
     lines.append(READ_ONLY_DISCLAIMER)
     return "\n".join(lines).strip()
+
+
+def _db_has_table(db: Session, table_name: str) -> bool:
+    try:
+        inspector = inspect(db.bind)
+        return inspector.has_table(table_name)
+    except Exception:
+        logger.exception("db_table_inspect_failed table=%s", table_name)
+        return False
+
+
+def _build_theme_digest_evidence(
+    db: Session,
+    themes: list[Theme],
+    window_start: datetime,
+    window_end: datetime,
+) -> dict[str, str]:
+    market_ids = [theme.representative.market_id for theme in themes if theme.representative.market_id]
+    if not market_ids:
+        return {}
+    rows = (
+        db.query(MarketSnapshot.market_id, MarketSnapshot.snapshot_bucket, MarketSnapshot.market_p_yes)
+        .filter(
+            MarketSnapshot.market_id.in_(market_ids),
+            MarketSnapshot.snapshot_bucket >= window_start,
+            MarketSnapshot.snapshot_bucket <= window_end,
+            MarketSnapshot.market_p_yes.isnot(None),
+        )
+        .order_by(MarketSnapshot.market_id.asc(), MarketSnapshot.snapshot_bucket.asc())
+        .all()
+    )
+    points_by_market: dict[str, list[tuple[datetime, float]]] = {}
+    for market_id, bucket, price in rows:
+        points_by_market.setdefault(market_id, []).append((bucket, price))
+
+    evidence_by_market: dict[str, str] = {}
+    for theme in themes:
+        rep = theme.representative
+        if not rep.market_id:
+            continue
+        points = points_by_market.get(rep.market_id, [])
+        direction = _alert_direction(rep)
+        sustained = _sustained_snapshot_count(points, direction)
+        reversal = _reversal_flag(points, direction)
+        evidence_by_market[rep.market_id] = _format_theme_evidence_line(sustained, reversal)
+    return evidence_by_market
+
+
+def _alert_direction(alert: Alert) -> int:
+    if alert.new_price is not None and alert.old_price is not None:
+        return 1 if alert.new_price - alert.old_price >= 0 else -1
+    return 1 if (alert.move or 0.0) >= 0 else -1
+
+
+def _sustained_snapshot_count(
+    points: list[tuple[datetime, float]],
+    direction: int,
+) -> int:
+    if not points:
+        return 0
+    if len(points) < 2:
+        return 1
+    streak_deltas = 0
+    for idx in range(len(points) - 1, 0, -1):
+        delta = points[idx][1] - points[idx - 1][1]
+        if delta * direction > 0:
+            streak_deltas += 1
+        else:
+            break
+    return max(streak_deltas + 1, 1)
+
+
+def _reversal_flag(points: list[tuple[datetime, float]], direction: int) -> str:
+    if len(points) < 2:
+        return "none"
+    baseline = points[0][1]
+    last = points[-1][1]
+    prev = points[-2][1]
+    if direction >= 0:
+        peak = max(price for _, price in points)
+        if peak <= baseline:
+            return "none"
+        if last <= baseline and prev <= baseline:
+            return "full"
+        if last < peak and prev < peak:
+            return "partial"
+        return "none"
+    peak = min(price for _, price in points)
+    if peak >= baseline:
+        return "none"
+    if last >= baseline and prev >= baseline:
+        return "full"
+    if last > peak and prev > peak:
+        return "partial"
+    return "none"
+
+
+def _format_theme_evidence_line(sustained_snapshots: int, reversal_flag: str) -> str:
+    return f"Evidence: sustained_snapshots={sustained_snapshots} | reversal_flag={reversal_flag}"
 
 
 def _format_digest_alert(
@@ -1582,13 +1695,19 @@ def _label_mapping_unknown(alert: Alert) -> bool:
     return mapping_confidence != "verified"
 
 
-def _copilot_daily_count_key(user_id: UUID, now_ts: datetime) -> str:
+def _copilot_daily_count_key(user_id: UUID, now_ts: datetime, signal_speed: str = SIGNAL_SPEED_STANDARD) -> str:
     date_key = now_ts.date().isoformat()
+    if signal_speed == SIGNAL_SPEED_FAST:
+        return COPILOT_FAST_DAILY_COUNT_KEY.format(user_id=user_id, date=date_key)
     return COPILOT_DAILY_COUNT_KEY.format(user_id=user_id, date=date_key)
 
 
-def _get_copilot_daily_count(user_id: UUID, now_ts: datetime) -> int:
-    key = _copilot_daily_count_key(user_id, now_ts)
+def _get_copilot_daily_count(
+    user_id: UUID,
+    now_ts: datetime,
+    signal_speed: str = SIGNAL_SPEED_STANDARD,
+) -> int:
+    key = _copilot_daily_count_key(user_id, now_ts, signal_speed)
     try:
         raw = redis_conn.get(key)
         if raw is None:
@@ -1601,8 +1720,18 @@ def _get_copilot_daily_count(user_id: UUID, now_ts: datetime) -> int:
         return 0
 
 
-def _get_copilot_theme_ttl(user_id: UUID, theme_key: str) -> int | None:
-    key = COPILOT_THEME_DEDUPE_KEY.format(user_id=user_id, theme_key=theme_key)
+def _copilot_theme_dedupe_key(user_id: UUID, theme_key: str, signal_speed: str) -> str:
+    if signal_speed == SIGNAL_SPEED_FAST:
+        return COPILOT_FAST_THEME_DEDUPE_KEY.format(user_id=user_id, theme_key=theme_key)
+    return COPILOT_THEME_DEDUPE_KEY.format(user_id=user_id, theme_key=theme_key)
+
+
+def _get_copilot_theme_ttl(
+    user_id: UUID,
+    theme_key: str,
+    signal_speed: str = SIGNAL_SPEED_STANDARD,
+) -> int | None:
+    key = _copilot_theme_dedupe_key(user_id, theme_key, signal_speed)
     try:
         ttl = redis_conn.ttl(key)
         if ttl is None or ttl < 0:
@@ -1652,6 +1781,7 @@ def _log_copilot_evaluation(
             {
                 "theme_key": evaluation.theme_key,
                 "market_id": evaluation.market_id,
+                "signal_speed": evaluation.signal_speed,
                 "reasons": evaluation.reasons,
             }
             for evaluation in sorted(evaluations, key=lambda item: item.theme_key)
@@ -1702,10 +1832,16 @@ def _enqueue_ai_recommendations(
     run_started_at = run_started_at or time.time()
     if classifier is None:
         classifier = lambda alert: classify_alert_with_snapshots(db, alert)
+    window_minutes = digest_window_minutes or config.digest_window_minutes
     daily_limit = max(config.max_copilot_per_day, 0)
+    fast_daily_limit = max(config.max_fast_copilot_per_day, 0)
     digest_limit = max(config.max_copilot_per_digest, 1)
-    daily_count = _get_copilot_daily_count(config.user_id, now_ts)
-    remaining_daily = max(daily_limit - daily_count, 0)
+    daily_count = _get_copilot_daily_count(config.user_id, now_ts, SIGNAL_SPEED_STANDARD)
+    fast_daily_count = _get_copilot_daily_count(config.user_id, now_ts, SIGNAL_SPEED_FAST)
+    remaining_daily_by_speed = {
+        SIGNAL_SPEED_STANDARD: max(daily_limit - daily_count, 0),
+        SIGNAL_SPEED_FAST: max(fast_daily_limit - fast_daily_count, 0),
+    }
     sent_this_digest = 0
     cap_reached_reason: str | None = None
     selected_theme_keys: list[str] = []
@@ -1778,6 +1914,10 @@ def _enqueue_ai_recommendations(
         rep_classification = theme.representative_classification
         if rep_classification is None:
             rep_classification = classifier(rep) if classifier else classify_alert_with_snapshots(db, rep)
+        snapshot_count = _count_snapshot_points(db, rep)
+        setattr(rep, "sustained_snapshots", snapshot_count)
+        signal_speed = classify_signal_speed(rep, window_minutes)
+        theme.signal_speed = signal_speed
         base_reasons: list[str] = []
         if not allow_enqueue:
             if not config.copilot_user_enabled:
@@ -1795,7 +1935,9 @@ def _enqueue_ai_recommendations(
 
         decision = _evaluate_delivery_decision(rep, rep_classification, config)
         if not decision.deliver and decision.reason:
-            if decision.reason == FilterReason.P_OUT_OF_BAND.value:
+            if decision.reason == FilterReason.P_OUT_OF_BAND.value and signal_speed == SIGNAL_SPEED_FAST:
+                pass
+            elif decision.reason == FilterReason.P_OUT_OF_BAND.value:
                 base_reasons.append(CopilotIneligibilityReason.P_OUT_OF_BAND.value)
             else:
                 base_reasons.append(decision.reason)
@@ -1806,11 +1948,11 @@ def _enqueue_ai_recommendations(
                 reasons.append(CopilotIneligibilityReason.LABEL_MAPPING_UNKNOWN.value)
             if _missing_price_or_liquidity(rep):
                 reasons.append(CopilotIneligibilityReason.MISSING_PRICE_OR_LIQUIDITY.value)
-            if _count_snapshot_points(db, rep) < 3:
+            if signal_speed != SIGNAL_SPEED_FAST and snapshot_count < 3:
                 reasons.append(CopilotIneligibilityReason.INSUFFICIENT_SNAPSHOTS.value)
 
         _sort_copilot_reasons(reasons)
-        evaluation = CopilotThemeEvaluation(theme.key, rep.market_id, reasons)
+        evaluation = CopilotThemeEvaluation(theme.key, rep.market_id, signal_speed, reasons)
         evaluations.append(evaluation)
         evaluations_by_key[theme.key] = evaluation
         if not evaluation.reasons:
@@ -1890,22 +2032,21 @@ def _enqueue_ai_recommendations(
 
     enqueued = 0
     for idx, theme in enumerate(ranked):
-        if remaining_daily <= 0:
-            cap_reached_reason = "daily"
-            logger.info(
-                "copilot_cap_reached user_id=%s plan_name=%s daily=%s/%s digest=%s/%s",
-                config.user_id,
-                config.plan_name,
-                daily_count,
-                daily_limit,
-                sent_this_digest,
-                digest_limit,
-            )
-            for remaining in ranked[idx:]:
-                evaluations_by_key[remaining.key].add_reason(
-                    CopilotIneligibilityReason.CAP_REACHED.value
+        signal_speed = theme.signal_speed or SIGNAL_SPEED_STANDARD
+        if remaining_daily_by_speed.get(signal_speed, 0) <= 0:
+            if signal_speed == SIGNAL_SPEED_STANDARD and cap_reached_reason is None:
+                cap_reached_reason = "daily"
+                logger.info(
+                    "copilot_cap_reached user_id=%s plan_name=%s daily=%s/%s digest=%s/%s",
+                    config.user_id,
+                    config.plan_name,
+                    daily_count,
+                    daily_limit,
+                    sent_this_digest,
+                    digest_limit,
                 )
-            break
+            evaluations_by_key[theme.key].add_reason(CopilotIneligibilityReason.CAP_REACHED.value)
+            continue
         if sent_this_digest >= digest_limit:
             cap_reached_reason = "digest"
             logger.info(
@@ -1928,25 +2069,33 @@ def _enqueue_ai_recommendations(
                 CopilotIneligibilityReason.COPILOT_DEDUPE_ACTIVE.value
             )
             continue
-        ttl_remaining = _get_copilot_theme_ttl(config.user_id, theme.key)
+        ttl_remaining = _get_copilot_theme_ttl(config.user_id, theme.key, signal_speed)
         if ttl_remaining:
             evaluations_by_key[theme.key].add_reason(
                 CopilotIneligibilityReason.COPILOT_DEDUPE_ACTIVE.value
             )
+            dedupe_key = _copilot_theme_dedupe_key(config.user_id, theme.key, signal_speed)
             logger.info(
                 "copilot_theme_skip_dedupe user_id=%s theme_key=%s ttl_remaining=%s dedupe_key=%s scope=theme",
                 config.user_id,
                 theme.key,
                 ttl_remaining,
-                COPILOT_THEME_DEDUPE_KEY.format(user_id=config.user_id, theme_key=theme.key),
+                dedupe_key,
             )
             continue
         selected_theme_keys.append(theme.key)
         if allow_enqueue and enqueue_jobs:
-            queue.enqueue(ai_recommendation_job, str(config.user_id), alert.id, run_id)
+            queue.enqueue(
+                ai_recommendation_job,
+                str(config.user_id),
+                alert.id,
+                run_id,
+                signal_speed,
+                window_minutes,
+            )
             enqueued += 1
         sent_this_digest += 1
-        remaining_daily -= 1
+        remaining_daily_by_speed[signal_speed] = remaining_daily_by_speed.get(signal_speed, 0) - 1
 
     logger.info(
         "copilot_theme_counts user_id=%s actionable_themes=%s eligible_themes=%s sent=%s",

@@ -6,7 +6,7 @@ from uuid import UUID
 import redis
 from sqlalchemy.orm import Session
 
-from ..models import Plan, User, UserAlertPreference, UserPreference
+from ..models import Plan, User, UserAlertPreference
 from ..settings import settings
 from . import defaults
 from .plans import plan_alert_rules
@@ -19,6 +19,7 @@ EFFECTIVE_SETTINGS_CACHE_TTL_SECONDS = 600
 
 _CODE_DEFAULTS = {
     "max_copilot_per_day": defaults.DEFAULT_MAX_COPILOT_PER_DAY,
+    "max_fast_copilot_per_day": defaults.DEFAULT_MAX_FAST_COPILOT_PER_DAY,
     "max_copilot_per_digest": defaults.DEFAULT_MAX_COPILOT_PER_DIGEST,
     "copilot_theme_ttl_minutes": defaults.DEFAULT_COPILOT_THEME_TTL_MINUTES,
     "digest_window_minutes": defaults.DEFAULT_DIGEST_WINDOW_MINUTES,
@@ -41,15 +42,6 @@ _CODE_DEFAULTS = {
     "fast_window_minutes": defaults.DEFAULT_FAST_WINDOW_MINUTES,
     "fast_max_themes_per_digest": defaults.DEFAULT_FAST_MAX_THEMES_PER_DIGEST,
     "fast_max_markets_per_theme": defaults.DEFAULT_FAST_MAX_MARKETS_PER_THEME,
-    "risk_budget_usd_per_day": defaults.DEFAULT_RISK_BUDGET_USD_PER_DAY,
-    "max_usd_per_trade": defaults.DEFAULT_MAX_USD_PER_TRADE,
-    "max_liquidity_fraction": defaults.DEFAULT_MAX_LIQUIDITY_FRACTION,
-}
-
-_RISK_DEFAULTS = {
-    "risk_budget_usd_per_day": defaults.DEFAULT_RISK_BUDGET_USD_PER_DAY,
-    "max_usd_per_trade": defaults.DEFAULT_MAX_USD_PER_TRADE,
-    "max_liquidity_fraction": defaults.DEFAULT_MAX_LIQUIDITY_FRACTION,
 }
 
 
@@ -58,6 +50,7 @@ class EffectiveSettings:
     plan_name: str | None
     copilot_enabled: bool
     max_copilot_per_day: int
+    max_fast_copilot_per_day: int
     max_copilot_per_digest: int
     copilot_theme_ttl_minutes: int
     digest_window_minutes: int
@@ -80,9 +73,6 @@ class EffectiveSettings:
     fast_window_minutes: int
     fast_max_themes_per_digest: int
     fast_max_markets_per_theme: int
-    risk_budget_usd_per_day: float
-    max_usd_per_trade: float
-    max_liquidity_fraction: float
 
 
 def get_effective_settings(db: Session, user_id: UUID) -> EffectiveSettings:
@@ -102,8 +92,7 @@ def get_effective_settings(db: Session, user_id: UUID) -> EffectiveSettings:
         .filter(UserAlertPreference.user_id == user_id)
         .one_or_none()
     )
-    risk_pref = _get_or_create_user_preferences(db, user.user_id)
-    effective = resolve_effective_settings(user, alert_pref, risk_pref)
+    effective = resolve_effective_settings(user, alert_pref)
     _store_cached(user.user_id, effective)
     return effective
 
@@ -111,7 +100,6 @@ def get_effective_settings(db: Session, user_id: UUID) -> EffectiveSettings:
 def get_effective_settings_for_user(
     user: User,
     pref: UserAlertPreference | None = None,
-    risk_pref: UserPreference | None = None,
     db: Session | None = None,
 ) -> EffectiveSettings:
     cached = _load_cached(user.user_id)
@@ -124,9 +112,7 @@ def get_effective_settings_for_user(
             .filter(UserAlertPreference.user_id == user.user_id)
             .one_or_none()
         )
-    if risk_pref is None and db is not None:
-        risk_pref = _get_or_create_user_preferences(db, user.user_id)
-    effective = resolve_effective_settings(user, pref, risk_pref)
+    effective = resolve_effective_settings(user, pref)
     _store_cached(user.user_id, effective)
     return effective
 
@@ -134,7 +120,6 @@ def get_effective_settings_for_user(
 def resolve_effective_settings(
     user: User,
     pref: UserAlertPreference | None = None,
-    risk_pref: UserPreference | None = None,
 ) -> EffectiveSettings:
     effective = dict(_CODE_DEFAULTS)
     plan = getattr(user, "plan", None)
@@ -151,9 +136,6 @@ def resolve_effective_settings(
 
     if pref is not None:
         _apply_user_alert_preferences(effective, pref)
-    if risk_pref is not None:
-        _apply_user_risk_preferences(effective, risk_pref)
-
     overrides = _load_overrides(user)
     if overrides:
         _apply_overrides(effective, overrides)
@@ -162,6 +144,7 @@ def resolve_effective_settings(
         plan_name=getattr(plan, "name", None),
         copilot_enabled=bool(getattr(user, "copilot_enabled", False)) and plan_copilot_enabled,
         max_copilot_per_day=int(effective["max_copilot_per_day"]),
+        max_fast_copilot_per_day=int(effective["max_fast_copilot_per_day"]),
         max_copilot_per_digest=int(effective["max_copilot_per_digest"]),
         copilot_theme_ttl_minutes=int(effective["copilot_theme_ttl_minutes"]),
         digest_window_minutes=int(effective["digest_window_minutes"]),
@@ -184,9 +167,6 @@ def resolve_effective_settings(
         fast_window_minutes=int(effective["fast_window_minutes"]),
         fast_max_themes_per_digest=int(effective["fast_max_themes_per_digest"]),
         fast_max_markets_per_theme=int(effective["fast_max_markets_per_theme"]),
-        risk_budget_usd_per_day=float(effective["risk_budget_usd_per_day"]),
-        max_usd_per_trade=float(effective["max_usd_per_trade"]),
-        max_liquidity_fraction=float(effective["max_liquidity_fraction"]),
     )
 
 
@@ -244,12 +224,6 @@ def _apply_user_alert_preferences(effective: dict, pref: UserAlertPreference) ->
         effective["fast_signals_enabled"] = bool(pref.fast_signals_enabled)
 
 
-def _apply_user_risk_preferences(effective: dict, pref: UserPreference) -> None:
-    effective["risk_budget_usd_per_day"] = float(pref.risk_budget_usd_per_day or 0.0)
-    effective["max_usd_per_trade"] = float(pref.max_usd_per_trade or 0.0)
-    effective["max_liquidity_fraction"] = float(pref.max_liquidity_fraction or 0.0)
-
-
 def _load_overrides(user: User) -> dict | None:
     raw = getattr(user, "overrides_json", None)
     if not raw:
@@ -291,6 +265,7 @@ def _apply_overrides(effective: dict, overrides: dict) -> None:
             continue
         if key in {
             "max_copilot_per_day",
+            "max_fast_copilot_per_day",
             "max_copilot_per_digest",
             "copilot_theme_ttl_minutes",
             "digest_window_minutes",
@@ -398,6 +373,7 @@ def _serialize_effective_settings(settings_obj: EffectiveSettings) -> dict:
         "plan_name": settings_obj.plan_name,
         "copilot_enabled": settings_obj.copilot_enabled,
         "max_copilot_per_day": settings_obj.max_copilot_per_day,
+        "max_fast_copilot_per_day": settings_obj.max_fast_copilot_per_day,
         "max_copilot_per_digest": settings_obj.max_copilot_per_digest,
         "copilot_theme_ttl_minutes": settings_obj.copilot_theme_ttl_minutes,
         "digest_window_minutes": settings_obj.digest_window_minutes,
@@ -420,9 +396,6 @@ def _serialize_effective_settings(settings_obj: EffectiveSettings) -> dict:
         "fast_window_minutes": settings_obj.fast_window_minutes,
         "fast_max_themes_per_digest": settings_obj.fast_max_themes_per_digest,
         "fast_max_markets_per_theme": settings_obj.fast_max_markets_per_theme,
-        "risk_budget_usd_per_day": settings_obj.risk_budget_usd_per_day,
-        "max_usd_per_trade": settings_obj.max_usd_per_trade,
-        "max_liquidity_fraction": settings_obj.max_liquidity_fraction,
     }
 
 
@@ -432,6 +405,7 @@ def _deserialize_effective_settings(payload: dict) -> EffectiveSettings | None:
             plan_name=payload.get("plan_name"),
             copilot_enabled=bool(payload.get("copilot_enabled", False)),
             max_copilot_per_day=int(payload.get("max_copilot_per_day", 0)),
+            max_fast_copilot_per_day=int(payload.get("max_fast_copilot_per_day", 0)),
             max_copilot_per_digest=int(payload.get("max_copilot_per_digest", 1)),
             copilot_theme_ttl_minutes=int(payload.get("copilot_theme_ttl_minutes", 0)),
             digest_window_minutes=int(payload.get("digest_window_minutes", 0)),
@@ -454,28 +428,6 @@ def _deserialize_effective_settings(payload: dict) -> EffectiveSettings | None:
             fast_window_minutes=int(payload.get("fast_window_minutes", 0)),
             fast_max_themes_per_digest=int(payload.get("fast_max_themes_per_digest", 0)),
             fast_max_markets_per_theme=int(payload.get("fast_max_markets_per_theme", 0)),
-            risk_budget_usd_per_day=float(payload.get("risk_budget_usd_per_day", 0.0)),
-            max_usd_per_trade=float(payload.get("max_usd_per_trade", 0.0)),
-            max_liquidity_fraction=float(payload.get("max_liquidity_fraction", 0.0)),
         )
     except Exception:
-        return None
-
-
-def _get_or_create_user_preferences(db: Session, user_id: UUID) -> UserPreference | None:
-    try:
-        pref = (
-            db.query(UserPreference)
-            .filter(UserPreference.user_id == user_id)
-            .one_or_none()
-        )
-        if pref:
-            return pref
-        pref = UserPreference(user_id=user_id)
-        db.add(pref)
-        db.commit()
-        db.refresh(pref)
-        return pref
-    except Exception:
-        logger.exception("user_preferences_load_failed user_id=%s", user_id)
         return None

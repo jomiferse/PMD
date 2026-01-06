@@ -22,6 +22,7 @@ class PlanSeed:
     price_monthly: float | None
     copilot_enabled: bool
     max_copilot_per_day: int
+    max_fast_copilot_per_day: int
     max_copilot_per_digest: int
     copilot_theme_ttl_minutes: int
     digest_window_minutes: int
@@ -45,6 +46,7 @@ class PlanSeed:
             "price_monthly": self.price_monthly,
             "copilot_enabled": self.copilot_enabled,
             "max_copilot_per_day": self.max_copilot_per_day,
+            "max_fast_copilot_per_day": self.max_fast_copilot_per_day,
             "max_copilot_per_digest": self.max_copilot_per_digest,
             "copilot_theme_ttl_minutes": self.copilot_theme_ttl_minutes,
             "digest_window_minutes": self.digest_window_minutes,
@@ -70,6 +72,7 @@ PLAN_SEEDS = [
         price_monthly=10.0,
         copilot_enabled=False,
         max_copilot_per_day=0,
+        max_fast_copilot_per_day=0,
         max_copilot_per_digest=0,
         copilot_theme_ttl_minutes=360,
         digest_window_minutes=60,
@@ -92,6 +95,7 @@ PLAN_SEEDS = [
         price_monthly=29.0,
         copilot_enabled=True,
         max_copilot_per_day=3,
+        max_fast_copilot_per_day=3,
         max_copilot_per_digest=1,
         copilot_theme_ttl_minutes=360,
         digest_window_minutes=30,
@@ -114,6 +118,7 @@ PLAN_SEEDS = [
         price_monthly=99.0,
         copilot_enabled=True,
         max_copilot_per_day=10,
+        max_fast_copilot_per_day=10,
         max_copilot_per_digest=2,
         copilot_theme_ttl_minutes=120,
         digest_window_minutes=15,

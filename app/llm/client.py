@@ -77,18 +77,26 @@ def get_trade_recommendation(context: dict[str, Any]) -> dict[str, str]:
 
 
 def _build_openai_payload(context: dict[str, Any]) -> dict[str, Any]:
+    fast_mode = str(context.get("signal_speed", "")).upper() == "FAST"
     system_prompt = (
         "You are a conservative trade assistant. Provide read-only decision support only. "
         "No financial advice. If information is insufficient or ambiguous, return WAIT. "
-        "Use the provided Evidence lines and avoid generic filler. "
+        "Use only the provided context and Evidence lines; avoid generic filler. "
+        "For WAIT/SKIP, do not propose trades or entries. "
         "Respond with strict JSON only."
     )
+    if fast_mode:
+        system_prompt += " For FAST signals, emphasize early momentum and volatility."
     user_prompt = (
         "Given the alert context, provide a recommendation.\n"
         "Return JSON with keys: recommendation (BUY/WAIT/SKIP), confidence (HIGH/MEDIUM/LOW), "
         "rationale (max 2 short bullets separated by '; '), risks (max 2 short bullets separated by '; '). "
-        "Bullets must reference the Evidence; avoid generic language."
+        "Bullets must reference the Evidence; avoid generic language. "
+        "For WAIT/SKIP: rationale = why not entering now; risks = what could invalidate the WAIT/SKIP. "
+        "If market_p_yes < 0.15 or > 0.85, include an explicit risk/reward implication in risks."
     )
+    if fast_mode:
+        user_prompt += " If signal_speed is FAST, prefer WAIT unless the early move is extremely strong."
     return {
         "model": settings.LLM_MODEL,
         "temperature": 0.2,

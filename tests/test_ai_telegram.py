@@ -6,6 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.core.ai_copilot import _build_evidence, _format_ai_message, handle_telegram_callback
+from app.core.signal_speed import SIGNAL_SPEED_FAST
 from app.db import Base
 from app.models import (
     AiRecommendation,
@@ -107,72 +108,68 @@ def test_ai_message_formatting_contains_sections():
         confidence="HIGH",
         rationale="Strong repricing; good liquidity",
         risks="Event risk",
-        draft_side="YES",
-        draft_price=0.5,
-        draft_size=100.0,
-        draft_notional_usd=50.0,
         status="PROPOSED",
         created_at=datetime.now(timezone.utc),
     )
     evidence = ["Sustained move across 3 snapshots (15m)"]
-    text, markup = _format_ai_message(alert, rec, evidence, None)
+    text, markup = _format_ai_message(alert, rec, evidence)
     assert "AI Copilot" in text
     assert "Evidence" in text
     assert "Rationale" in text
     assert "Risks" in text
-    assert "Draft order" in text
-    assert "token_id" in text
-    assert "side_label" in text
+    assert "Manual execution only. PMD does not place orders." in text
+    assert "https://polymarket.com/market/market-1" in text
     assert markup["inline_keyboard"]
 
 
-def test_ai_message_side_label_uses_primary_outcome():
-    alert = _make_alert(
-        primary_outcome_label="OVER",
-        is_yesno=False,
-        market_kind="ou",
-        mapping_confidence="verified",
-    )
+def test_ai_message_wait_includes_change_view_and_rr_note():
+    alert = _make_alert(market_p_yes=0.9, liquidity=500.0, volume_24h=500.0)
     rec = AiRecommendation(
         user_id=uuid4(),
         alert_id=1,
-        recommendation="BUY",
-        confidence="HIGH",
-        rationale="test",
-        risks="test",
-        draft_side="YES",
-        draft_price=0.5,
-        draft_size=100.0,
-        draft_notional_usd=50.0,
+        recommendation="WAIT",
+        confidence="LOW",
+        rationale="Move fading; thin liquidity",
+        risks="Reversal confirmed",
         status="PROPOSED",
         created_at=datetime.now(timezone.utc),
     )
-    text, _ = _format_ai_message(alert, rec, ["Evidence line"], None)
-    assert "side_label: OVER" in text
-    assert "side:" not in text
+    evidence = ["Sustained move across 1 snapshots (0m)"]
+    text, _ = _format_ai_message(alert, rec, evidence)
+    assert "Rationale (why not entering now)" in text
+    assert "Risks (what could invalidate this WAIT)" in text
+    assert "What would change this view" in text
+    assert "Risk/reward skewed" in text
+    assert "Liquidity clears" in text or "24h volume clears" in text
+    assert "Manual execution only. PMD does not place orders." in text
 
 
-def test_ai_message_includes_draft_unavailable_reasons():
+def test_fast_message_includes_label_and_window():
     alert = _make_alert()
     rec = AiRecommendation(
         user_id=uuid4(),
         alert_id=1,
-        recommendation="BUY",
-        confidence="HIGH",
-        rationale="test",
-        risks="test",
-        draft_side=None,
-        draft_price=None,
-        draft_size=None,
-        draft_notional_usd=None,
+        recommendation="WAIT",
+        confidence="MEDIUM",
+        rationale="Early move; limited follow-through",
+        risks="Volatility fades",
         status="PROPOSED",
         created_at=datetime.now(timezone.utc),
     )
-    reasons = ["max_usd_per_trade is 0 (or missing)", "missing price"]
-    text, _ = _format_ai_message(alert, rec, ["Evidence line"], reasons)
-    assert "Draft size unavailable" in text
-    assert "max_usd_per_trade is 0 (or missing)" in text
-    assert "missing price" in text
+    evidence = [
+        "Sustained move across 2 snapshots (10m)",
+        "Abs move: +0.040 | pct: +4.0% (10m)",
+    ]
+    text, _ = _format_ai_message(
+        alert,
+        rec,
+        evidence,
+        signal_speed=SIGNAL_SPEED_FAST,
+        window_minutes=10,
+    )
+    assert "FAST Copilot" in text
+    assert "Early move in last 10m" in text
+    assert "WATCH" in text
 
 
 def test_evidence_includes_metrics(db_session):
@@ -230,11 +227,7 @@ def test_callback_confirm_updates_status(db_session, monkeypatch):
         user_id=uuid4(),
         name="Trader",
         telegram_chat_id="123",
-        overrides_json={
-            "risk_budget_usd_per_day": 100.0,
-            "max_usd_per_trade": 50.0,
-            "max_liquidity_fraction": 0.01,
-        },
+        overrides_json={},
     )
     alert = _make_alert()
     db_session.add_all([user, alert])
@@ -247,10 +240,6 @@ def test_callback_confirm_updates_status(db_session, monkeypatch):
         confidence="HIGH",
         rationale="test",
         risks="test",
-        draft_side="YES",
-        draft_price=0.5,
-        draft_size=100.0,
-        draft_notional_usd=50.0,
         status="PROPOSED",
         created_at=datetime.now(timezone.utc),
     )
@@ -259,7 +248,6 @@ def test_callback_confirm_updates_status(db_session, monkeypatch):
 
     monkeypatch.setattr("app.core.ai_copilot.send_telegram_message", lambda *args, **kwargs: None)
     monkeypatch.setattr("app.core.ai_copilot.answer_callback_query", lambda *args, **kwargs: None)
-    monkeypatch.setattr("app.core.ai_copilot._register_risk_spend", lambda *args, **kwargs: None)
 
     payload = {
         "callback_query": {
@@ -275,16 +263,12 @@ def test_callback_confirm_updates_status(db_session, monkeypatch):
     assert refreshed.status == "CONFIRMED"
 
 
-def test_confirm_payload_contains_draft(db_session, monkeypatch):
+def test_confirm_payload_contains_market_link(db_session, monkeypatch):
     user = User(
         user_id=uuid4(),
         name="Trader",
         telegram_chat_id="123",
-        overrides_json={
-            "risk_budget_usd_per_day": 100.0,
-            "max_usd_per_trade": 50.0,
-            "max_liquidity_fraction": 0.01,
-        },
+        overrides_json={},
     )
     alert = _make_alert()
     db_session.add_all([user, alert])
@@ -297,10 +281,6 @@ def test_confirm_payload_contains_draft(db_session, monkeypatch):
         confidence="HIGH",
         rationale="test",
         risks="test",
-        draft_side="YES",
-        draft_price=0.5,
-        draft_size=100.0,
-        draft_notional_usd=50.0,
         status="PROPOSED",
         created_at=datetime.now(timezone.utc),
     )
@@ -315,7 +295,6 @@ def test_confirm_payload_contains_draft(db_session, monkeypatch):
 
     monkeypatch.setattr("app.core.ai_copilot.send_telegram_message", _fake_send)
     monkeypatch.setattr("app.core.ai_copilot.answer_callback_query", lambda *args, **kwargs: None)
-    monkeypatch.setattr("app.core.ai_copilot._register_risk_spend", lambda *args, **kwargs: None)
 
     payload = {
         "callback_query": {
@@ -326,65 +305,9 @@ def test_confirm_payload_contains_draft(db_session, monkeypatch):
     }
     handle_telegram_callback(db_session, payload)
     assert "Confirmed (manual only)." in sent["text"]
-    assert "Suggested side" in sent["text"]
-    assert "Suggested amount" in sent["text"]
     assert "Slug: market-1" in sent["text"]
     assert "https://polymarket.com/market/market-1" in sent["text"]
-    assert "null" not in sent["text"].lower()
-
-
-def test_confirm_payload_missing_inputs_note(db_session, monkeypatch):
-    user = User(
-        user_id=uuid4(),
-        name="Trader",
-        telegram_chat_id="123",
-        overrides_json={
-            "risk_budget_usd_per_day": 0.0,
-            "max_usd_per_trade": 0.0,
-            "max_liquidity_fraction": 0.0,
-        },
-    )
-    alert = _make_alert(liquidity=0.0, market_p_yes=0.0, new_price=0.0)
-    db_session.add_all([user, alert])
-    db_session.commit()
-
-    rec = AiRecommendation(
-        user_id=user.user_id,
-        alert_id=alert.id,
-        recommendation="BUY",
-        confidence="HIGH",
-        rationale="test",
-        risks="test",
-        draft_side=None,
-        draft_price=None,
-        draft_size=None,
-        draft_notional_usd=None,
-        status="PROPOSED",
-        created_at=datetime.now(timezone.utc),
-    )
-    db_session.add(rec)
-    db_session.commit()
-
-    sent = {}
-
-    def _fake_send(chat_id, text, reply_markup=None):
-        sent["text"] = text
-        return None
-
-    monkeypatch.setattr("app.core.ai_copilot.send_telegram_message", _fake_send)
-    monkeypatch.setattr("app.core.ai_copilot.answer_callback_query", lambda *args, **kwargs: None)
-    monkeypatch.setattr("app.core.ai_copilot._register_risk_spend", lambda *args, **kwargs: None)
-
-    payload = {
-        "callback_query": {
-            "id": "3",
-            "data": f"confirm:{rec.id}",
-            "message": {"chat": {"id": "123"}, "message_id": "1001"},
-        }
-    }
-    handle_telegram_callback(db_session, payload)
-    assert "Confirmed (manual only)." in sent["text"]
-    assert "Draft inputs missing" in sent["text"]
+    assert "Manual execution only. PMD does not place orders." in sent["text"]
     assert "null" not in sent["text"].lower()
 
 
@@ -393,11 +316,7 @@ def test_duplicate_callback_id_is_idempotent(db_session, monkeypatch):
         user_id=uuid4(),
         name="Trader",
         telegram_chat_id="123",
-        overrides_json={
-            "risk_budget_usd_per_day": 100.0,
-            "max_usd_per_trade": 50.0,
-            "max_liquidity_fraction": 0.01,
-        },
+        overrides_json={},
     )
     alert = _make_alert()
     db_session.add_all([user, alert])
@@ -410,10 +329,6 @@ def test_duplicate_callback_id_is_idempotent(db_session, monkeypatch):
         confidence="HIGH",
         rationale="test",
         risks="test",
-        draft_side="YES",
-        draft_price=0.5,
-        draft_size=100.0,
-        draft_notional_usd=50.0,
         status="PROPOSED",
         created_at=datetime.now(timezone.utc),
     )
@@ -459,7 +374,6 @@ def test_duplicate_callback_id_is_idempotent(db_session, monkeypatch):
     monkeypatch.setattr("app.core.ai_copilot.edit_message_reply_markup", lambda *args, **kwargs: None)
     monkeypatch.setattr("app.core.ai_copilot.send_telegram_message", lambda *args, **kwargs: None)
     monkeypatch.setattr("app.core.ai_copilot.answer_callback_query", lambda *args, **kwargs: None)
-    monkeypatch.setattr("app.core.ai_copilot._register_risk_spend", lambda *args, **kwargs: None)
 
     payload = {
         "callback_query": {
@@ -480,11 +394,7 @@ def test_status_transitions_are_idempotent(db_session, monkeypatch):
         user_id=uuid4(),
         name="Trader",
         telegram_chat_id="123",
-        overrides_json={
-            "risk_budget_usd_per_day": 100.0,
-            "max_usd_per_trade": 50.0,
-            "max_liquidity_fraction": 0.01,
-        },
+        overrides_json={},
     )
     alert = _make_alert()
     db_session.add_all([user, alert])
@@ -497,10 +407,6 @@ def test_status_transitions_are_idempotent(db_session, monkeypatch):
         confidence="HIGH",
         rationale="test",
         risks="test",
-        draft_side="YES",
-        draft_price=0.5,
-        draft_size=100.0,
-        draft_notional_usd=50.0,
         status="PROPOSED",
         created_at=datetime.now(timezone.utc),
     )
@@ -509,7 +415,6 @@ def test_status_transitions_are_idempotent(db_session, monkeypatch):
 
     monkeypatch.setattr("app.core.ai_copilot.send_telegram_message", lambda *args, **kwargs: None)
     monkeypatch.setattr("app.core.ai_copilot.answer_callback_query", lambda *args, **kwargs: None)
-    monkeypatch.setattr("app.core.ai_copilot._register_risk_spend", lambda *args, **kwargs: None)
 
     payload_confirm = {
         "callback_query": {

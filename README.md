@@ -7,7 +7,7 @@ PMD is a read-only analytics service that detects Polymarket mispricings and del
 - Polymarket Gamma ingestion -> 5-minute market snapshots
 - Dislocation + FAST signals -> alerts
 - Effective settings per user (code defaults -> plan -> user overrides)
-- Telegram digests + AI Copilot (manual execution only)
+- Telegram digests + AI Copilot (manual execution only, no order sizing)
 
 ## Quick start (fresh DB)
 
@@ -64,7 +64,7 @@ docker compose exec api alembic upgrade head
 ## Plans
 
 Basic (default):
-- Copilot disabled, no draft orders
+- Copilot disabled
 - 60m digest window, max 3 themes, max 3 alerts
 - STRONG alerts only, higher liquidity/volume filters
 - FAST disabled
@@ -81,8 +81,8 @@ Elite:
 - STRONG + MEDIUM alerts, lower liquidity/volume thresholds
 - FAST enabled (watchlist)
 
-Monetized limits: Copilot caps, digest cadence, theme/alert caps, FAST access,
-and risk sizing defaults (budget + per-trade caps). Plan caps can be overridden per user.
+Monetized limits: Copilot caps, digest cadence, theme/alert caps, FAST access.
+Plan caps can be overridden per user.
 
 ## Environment variables
 
@@ -167,9 +167,8 @@ docker compose exec api python -m app.scripts.manage_users test --user Alice
 
 ## AI Copilot (manual execution)
 
-Copilot is read-only. It generates a draft order payload for manual execution and never
-submits orders. Copilot must be enabled on the plan and per user via `copilot_enabled`.
-Risk sizing limits live in plans or per-user overrides.
+Copilot is read-only decision support. It does not generate order sizes or submit orders.
+Copilot must be enabled on the plan and per user via `copilot_enabled`.
 
 ## FAST vs CONFIRMED signals
 

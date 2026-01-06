@@ -9,7 +9,13 @@ from ..core.ai_copilot import create_ai_recommendation, _complete_copilot_run
 from ..core.user_settings import get_effective_user_settings
 
 
-def ai_recommendation_job(user_id: str, alert_id: int, run_id: str | None = None) -> dict:
+def ai_recommendation_job(
+    user_id: str,
+    alert_id: int,
+    run_id: str | None = None,
+    signal_speed: str | None = None,
+    window_minutes: int | None = None,
+) -> dict:
     db: Session = SessionLocal()
     try:
         parsed_user_id = user_id
@@ -27,7 +33,14 @@ def ai_recommendation_job(user_id: str, alert_id: int, run_id: str | None = None
         alert = db.query(Alert).filter(Alert.id == alert_id).one_or_none()
         if not alert:
             return {"ok": False, "reason": "alert_missing"}
-        rec = create_ai_recommendation(db, user, alert, run_id=run_id)
+        rec = create_ai_recommendation(
+            db,
+            user,
+            alert,
+            run_id=run_id,
+            signal_speed=signal_speed,
+            window_minutes=window_minutes,
+        )
         if not rec:
             return {"ok": False, "reason": "no_recommendation"}
         return {"ok": True, "recommendation_id": rec.id}
