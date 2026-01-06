@@ -7,10 +7,10 @@ from . import defaults
 from .alert_classification import AlertClass
 
 
-DEFAULT_PLAN_NAME = "free"
+DEFAULT_PLAN_NAME = "basic"
 RECOMMENDED_PLAN_NAME = "pro"
 UPGRADE_PATH = {
-    "free": "pro",
+    "basic": "pro",
     "pro": "elite",
     "elite": None,
 }
@@ -72,8 +72,8 @@ class PlanSeed:
 
 PLAN_SEEDS = [
     PlanSeed(
-        name="free",
-        price_monthly=0.0,
+        name="basic",
+        price_monthly=10.0,
         copilot_enabled=False,
         max_copilot_per_day=0,
         max_fast_copilot_per_day=0,
@@ -176,7 +176,7 @@ class PlanAlertRules:
 
 
 PLAN_ALERT_RULES: dict[str, PlanAlertRules] = {
-    "free": PlanAlertRules(
+    "basic": PlanAlertRules(
         allow_info_alerts=False,
         allow_fast_alerts=False,
         soft_band=(defaults.DEFAULT_SOFT_P_MIN, defaults.DEFAULT_SOFT_P_MAX),

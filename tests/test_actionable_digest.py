@@ -573,7 +573,7 @@ def test_copilot_skip_reason_visible_on_caps(db_session, monkeypatch):
     assert "Copilot skipped: CAP_REACHED" in payloads[0]["text"]
 
 
-def test_info_only_blocked_on_free_plan(db_session, monkeypatch):
+def test_info_only_blocked_on_basic_plan(db_session, monkeypatch):
     _patch_digest_helpers(monkeypatch)
 
     alert = _make_alert(market_id="market-info")

@@ -177,7 +177,7 @@ def upgrade() -> None:
         sa.Column("tenant_id", sa.String(length=64), nullable=False),
         sa.Column("name", sa.String(length=128), nullable=False),
         sa.Column("key_hash", sa.String(length=64), nullable=False),
-        sa.Column("plan", sa.String(length=64), nullable=False, default="free"),
+        sa.Column("plan", sa.String(length=64), nullable=False, default="basic"),
         sa.Column("rate_limit_per_min", sa.Integer(), nullable=False, default=60),
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.Column("last_used_at", sa.DateTime(), nullable=True),

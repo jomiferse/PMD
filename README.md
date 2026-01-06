@@ -29,7 +29,7 @@ docker compose up -d --build
 docker compose exec api alembic upgrade head
 ```
 
-4) Seed pricing plans (assigns all users to Free):
+4) Seed pricing plans (assigns all users to Basic):
 
 ```bash
 docker compose exec api python -m app.scripts.seed_plans
@@ -65,7 +65,7 @@ docker compose exec api alembic upgrade head
 
 | Plan | Digest window | Max themes/digest | Strengths | Copilot | Copilot caps | FAST | Fast window |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Free (default) | 60m | 3 | STRONG | Disabled | n/a | Disabled | n/a |
+| Basic (default) | 60m | 3 | STRONG | Disabled | n/a | Disabled | n/a |
 | Pro (recommended) | 30m | 5 | STRONG, MEDIUM | Enabled | 1/digest, 3/hour, 30/day | WATCH_ONLY | 10m |
 | Elite | 15m | 10 | STRONG, MEDIUM | Enabled | 1/digest, 12/hour, 200/day | FULL | 5m |
 

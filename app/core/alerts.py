@@ -2519,7 +2519,7 @@ def _build_cap_reached_message(
 ) -> str | None:
     if not cap_reached:
         return None
-    plan_label = (config.plan_name or "free").upper()
+    plan_label = (config.plan_name or "basic").upper()
     if cap_reached == "daily":
         usage_text = daily_usage
         period_label = "today"

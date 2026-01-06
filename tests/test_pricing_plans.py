@@ -97,9 +97,9 @@ def _make_alert(**overrides):
     return Alert(**data)
 
 
-def test_free_plan_disables_copilot(db_session, monkeypatch):
-    free_plan = _seed_plan(db_session, "free")
-    user = User(user_id=uuid4(), name="FreeUser", plan_id=free_plan.id, copilot_enabled=True)
+def test_basic_plan_disables_copilot(db_session, monkeypatch):
+    basic_plan = _seed_plan(db_session, "basic")
+    user = User(user_id=uuid4(), name="BasicUser", plan_id=basic_plan.id, copilot_enabled=True)
     alert = _make_alert()
     db_session.add_all([user, alert])
     db_session.commit()
@@ -124,15 +124,15 @@ def test_free_plan_disables_copilot(db_session, monkeypatch):
     assert not enqueued
 
 
-def test_free_plan_never_calls_llm(db_session, monkeypatch):
-    free_plan = _seed_plan(db_session, "free")
-    user = User(user_id=uuid4(), name="FreeUser", plan_id=free_plan.id, copilot_enabled=True)
+def test_basic_plan_never_calls_llm(db_session, monkeypatch):
+    basic_plan = _seed_plan(db_session, "basic")
+    user = User(user_id=uuid4(), name="BasicUser", plan_id=basic_plan.id, copilot_enabled=True)
     alert = _make_alert()
     db_session.add_all([user, alert])
     db_session.commit()
 
     def _should_not_call(*_args, **_kwargs):
-        raise AssertionError("LLM should not be called for free plan")
+        raise AssertionError("LLM should not be called for basic plan")
 
     monkeypatch.setattr("app.core.ai_copilot.get_trade_recommendation", _should_not_call)
 
