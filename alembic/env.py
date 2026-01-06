@@ -4,7 +4,7 @@ from sqlalchemy import create_engine, pool
 
 from app.settings import settings
 from app.db import Base
-import app.models
+import app.models  # noqa: F401
 
 config = context.config
 
