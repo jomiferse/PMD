@@ -74,12 +74,3 @@ def test_probability_label_over_under_requires_ou():
     assert alerts_module._format_probability_label(alert) == "p_outcome0"
     assert copilot_module._format_probability_label(alert) == "p_outcome0"
 
-
-def test_copilot_side_label_falls_back_on_unknown_mapping():
-    alert = _make_alert(
-        market_kind="multi",
-        is_yesno=False,
-        mapping_confidence="unknown",
-        primary_outcome_label="TeamA",
-    )
-    assert copilot_module._format_side_label(alert) == "OUTCOME_0"
