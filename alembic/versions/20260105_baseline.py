@@ -26,6 +26,7 @@ def upgrade() -> None:
         sa.Column("is_active", sa.Boolean(), nullable=False, default=True),
         sa.Column("copilot_enabled", sa.Boolean(), nullable=True),
         sa.Column("max_copilot_per_day", sa.Integer(), nullable=True),
+        sa.Column("max_fast_copilot_per_day", sa.Integer(), nullable=True),
         sa.Column("max_copilot_per_digest", sa.Integer(), nullable=True),
         sa.Column("copilot_theme_ttl_minutes", sa.Integer(), nullable=True),
         sa.Column("fast_signals_enabled", sa.Boolean(), nullable=True),
