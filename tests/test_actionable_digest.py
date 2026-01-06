@@ -531,6 +531,48 @@ def test_fast_repricings_skip_probability_band(db_session, monkeypatch):
     assert deliveries and deliveries[0].filter_reasons in (None, [])
 
 
+def test_copilot_skip_reason_visible_on_caps(db_session, monkeypatch):
+    alert = _make_alert(market_id="market-cap")
+    db_session.add(alert)
+    db_session.commit()
+
+    monkeypatch.setattr("app.core.alerts._digest_recently_sent", lambda *args, **kwargs: False)
+    monkeypatch.setattr("app.core.alerts._claim_digest_fingerprint", lambda *args, **kwargs: True)
+    monkeypatch.setattr("app.core.alerts._record_digest_sent", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "app.core.alerts.classify_alert_with_snapshots",
+        lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
+    )
+    monkeypatch.setattr(
+        "app.core.alerts._count_snapshot_points_bulk",
+        lambda *_args, **_kwargs: {alert.market_id: 3},
+    )
+    monkeypatch.setattr("app.core.alerts._label_mapping_unknown", lambda *_args, **_kwargs: False)
+
+    fake_redis = FakeRedis()
+    user_id = uuid4()
+    date_key = datetime.now(timezone.utc).date().isoformat()
+    fake_redis.store[f"copilot:count:{user_id}:{date_key}"] = "1"
+    monkeypatch.setattr("app.core.alerts.redis_conn", fake_redis)
+
+    payloads = []
+    _install_fake_telegram(monkeypatch, payloads)
+
+    config = _make_config(
+        user_id=user_id,
+        ai_copilot_enabled=True,
+        copilot_user_enabled=True,
+        copilot_plan_enabled=True,
+        max_copilot_per_day=1,
+        max_copilot_per_digest=1,
+    )
+    result = asyncio.run(_send_user_digest(db_session, "tenant-1", config))
+
+    assert result["sent"] is True
+    assert payloads
+    assert "Copilot skipped: CAP_REACHED" in payloads[0]["text"]
+
+
 def test_info_only_blocked_on_free_plan(db_session, monkeypatch):
     _patch_digest_helpers(monkeypatch)
 

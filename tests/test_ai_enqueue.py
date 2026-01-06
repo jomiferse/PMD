@@ -272,6 +272,36 @@ def test_elite_copilot_override_bypasses_dedupe(db_session, monkeypatch):
     assert len(enqueued) == 1
 
 
+def test_elite_guarantee_sends_when_eligible(db_session, monkeypatch):
+    user_id = uuid4()
+    alert = _make_alert(
+        market_id="market-elite",
+        title="Will the price of Bitcoin be above $50 on Jan 5 2026?",
+    )
+    db_session.add(alert)
+    db_session.commit()
+
+    enqueued = []
+    monkeypatch.setattr("app.core.alerts.redis_conn", FakeRedis())
+    monkeypatch.setattr(
+        "app.core.alerts.classify_alert_with_snapshots",
+        lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
+    )
+    monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: enqueued.append(args))
+
+    config = _make_config(user_id)
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "plan_name": "elite",
+            "max_copilot_per_digest": 1,
+        }
+    )
+    result = _enqueue_ai_recommendations(db_session, config, [alert])
+    assert result.enqueued == 1
+    assert result.cap_reached_reason is None
+
+
 def test_copilot_triggers_for_actionable_theme(db_session, monkeypatch):
     user_id = uuid4()
     alerts = [

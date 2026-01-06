@@ -29,7 +29,7 @@ docker compose up -d --build
 docker compose exec api alembic upgrade head
 ```
 
-4) Seed pricing plans (assigns all users to Basic):
+4) Seed pricing plans (assigns all users to Free):
 
 ```bash
 docker compose exec api python -m app.scripts.seed_plans
@@ -63,23 +63,15 @@ docker compose exec api alembic upgrade head
 
 ## Plans
 
-Basic (default):
-- Copilot disabled
-- 60m digest window, max 3 themes, max 3 alerts
-- STRONG alerts only, higher liquidity/volume filters
-- FAST disabled
+| Plan | Digest window | Max themes/digest | Strengths | Copilot | Copilot caps | FAST | Fast window |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Free (default) | 60m | 3 | STRONG | Disabled | n/a | Disabled | n/a |
+| Pro (recommended) | 30m | 5 | STRONG, MEDIUM | Enabled | 1/digest, 3/hour, 30/day | WATCH_ONLY | 10m |
+| Elite | 15m | 10 | STRONG, MEDIUM | Enabled | 1/digest, 12/hour, 200/day | FULL | 5m |
 
-Pro (recommended):
-- Copilot enabled (3/day, 1 per digest), 6h theme TTL
-- 30m digest window, max 5 themes
-- STRONG + MEDIUM alerts
-- FAST enabled (watchlist)
-
-Elite:
-- Copilot enabled (10/day, 2 per digest), 2h theme TTL
-- 15m digest window, max 10 themes
-- STRONG + MEDIUM alerts, lower liquidity/volume thresholds
-- FAST enabled (watchlist)
+Copilot caps apply per user and are enforced only after successful Telegram sends.
+Elite includes an always-on guarantee: if eligible themes exist and caps are not reached, at least 1 Copilot message is sent per digest.
+When Copilot is blocked (caps, plan disabled, or dedupe), the digest appends a short skip reason line.
 
 Monetized limits: Copilot caps, digest cadence, theme/alert caps, FAST access.
 Plan caps can be overridden per user.
@@ -175,6 +167,10 @@ Copilot must be enabled on the plan and per user via `copilot_enabled`.
 FAST signals are watchlist-only dislocations delivered in a separate FAST digest. They
 never trigger Copilot. CONFIRMED signals are the regular dislocation alerts used for
 theme grouping, digests, and Copilot eligibility.
+
+FAST modes:
+- WATCH_ONLY: FAST digest only (no actionable fast alerts in the main digest).
+- FULL: FAST digest + actionable fast alerts when allowed by plan rules.
 
 ## Troubleshooting
 

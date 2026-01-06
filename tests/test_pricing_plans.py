@@ -6,6 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.core.alert_classification import AlertClassification, AlertClass
+from app.core.ai_copilot import create_ai_recommendation
 from app.core.alerts import _enqueue_ai_recommendations, _resolve_user_preferences
 from app.core.plans import get_plan_seeds
 from app.core.user_settings import get_effective_user_settings
@@ -96,9 +97,9 @@ def _make_alert(**overrides):
     return Alert(**data)
 
 
-def test_basic_plan_disables_copilot(db_session, monkeypatch):
-    basic_plan = _seed_plan(db_session, "basic")
-    user = User(user_id=uuid4(), name="BasicUser", plan_id=basic_plan.id, copilot_enabled=True)
+def test_free_plan_disables_copilot(db_session, monkeypatch):
+    free_plan = _seed_plan(db_session, "free")
+    user = User(user_id=uuid4(), name="FreeUser", plan_id=free_plan.id, copilot_enabled=True)
     alert = _make_alert()
     db_session.add_all([user, alert])
     db_session.commit()
@@ -123,6 +124,22 @@ def test_basic_plan_disables_copilot(db_session, monkeypatch):
     assert not enqueued
 
 
+def test_free_plan_never_calls_llm(db_session, monkeypatch):
+    free_plan = _seed_plan(db_session, "free")
+    user = User(user_id=uuid4(), name="FreeUser", plan_id=free_plan.id, copilot_enabled=True)
+    alert = _make_alert()
+    db_session.add_all([user, alert])
+    db_session.commit()
+
+    def _should_not_call(*_args, **_kwargs):
+        raise AssertionError("LLM should not be called for free plan")
+
+    monkeypatch.setattr("app.core.ai_copilot.get_trade_recommendation", _should_not_call)
+
+    result = create_ai_recommendation(db_session, user, alert)
+    assert result is None
+
+
 def test_pro_plan_daily_cap_respected(db_session, monkeypatch):
     pro_plan = _seed_plan(db_session, "pro")
     user_id = uuid4()
@@ -134,7 +151,7 @@ def test_pro_plan_daily_cap_respected(db_session, monkeypatch):
     config = _resolve_user_preferences(user, None, db_session)
     fake_redis = FakeRedis()
     date_key = datetime.now(timezone.utc).date().isoformat()
-    fake_redis.store[f"copilot:count:{user_id}:{date_key}"] = "2"
+    fake_redis.store[f"copilot:count:{user_id}:{date_key}"] = str(config.max_copilot_per_day - 1)
     monkeypatch.setattr("app.core.alerts.redis_conn", fake_redis)
     monkeypatch.setattr(
         "app.core.alerts.classify_alert_with_snapshots",
@@ -159,7 +176,7 @@ def test_pro_plan_daily_cap_respected(db_session, monkeypatch):
     assert len(enqueued) == 1
 
     enqueued.clear()
-    fake_redis.store[f"copilot:count:{user_id}:{date_key}"] = "3"
+    fake_redis.store[f"copilot:count:{user_id}:{date_key}"] = str(config.max_copilot_per_day)
     _enqueue_ai_recommendations(
         db_session,
         config,
@@ -169,6 +186,42 @@ def test_pro_plan_daily_cap_respected(db_session, monkeypatch):
         ),
     )
     assert not enqueued
+
+
+def test_pro_plan_limits_copilot_per_digest(db_session, monkeypatch):
+    pro_plan = _seed_plan(db_session, "pro")
+    user_id = uuid4()
+    user = User(user_id=user_id, name="ProUser", plan_id=pro_plan.id, copilot_enabled=True)
+    alerts = [
+        _make_alert(market_id="market-1"),
+        _make_alert(market_id="market-2"),
+    ]
+    db_session.add_all([user] + alerts)
+    db_session.commit()
+
+    config = _resolve_user_preferences(user, None, db_session)
+    monkeypatch.setattr("app.core.alerts.redis_conn", FakeRedis())
+    monkeypatch.setattr(
+        "app.core.alerts.classify_alert_with_snapshots",
+        lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
+    )
+    monkeypatch.setattr(
+        "app.core.alerts._count_snapshot_points_bulk",
+        lambda *_args, **_kwargs: {alert.market_id: 3 for alert in alerts},
+    )
+    monkeypatch.setattr("app.core.alerts._label_mapping_unknown", lambda *_args, **_kwargs: False)
+    enqueued = []
+    monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: enqueued.append(args))
+
+    _enqueue_ai_recommendations(
+        db_session,
+        config,
+        alerts,
+        classifier=lambda *_args, **_kwargs: AlertClassification(
+            "REPRICING", "HIGH", "FOLLOW", alert_class=AlertClass.ACTIONABLE_STANDARD
+        ),
+    )
+    assert len(enqueued) == config.max_copilot_per_digest
 
 
 def test_elite_plan_increases_caps(db_session):
