@@ -30,6 +30,7 @@ from ..models import (
     UserAlertPreference,
 )
 from ..settings import settings
+from ..http_logging import HttpxTimer, log_httpx_response
 from . import defaults
 from .ai_copilot import init_copilot_run, log_copilot_run_summary, store_copilot_last_status
 from .alert_strength import AlertStrength
@@ -577,7 +578,7 @@ async def _send_user_digest(
     for alert in selected_alerts:
         classification = classifier(alert)
         counts[classification.signal_type] = counts.get(classification.signal_type, 0) + 1
-    logger.info(
+    logger.debug(
         "alert_classification_summary user_id=%s repricing=%s liquidity_sweep=%s noisy=%s total=%s",
         config.user_id,
         counts.get("REPRICING", 0),
@@ -637,7 +638,9 @@ async def _send_user_digest(
     }
     try:
         async with httpx.AsyncClient(timeout=10) as client:
+            timer = HttpxTimer()
             response = await client.post(url, json=payload)
+        log_httpx_response(response, timer.elapsed(), log_error=False)
         if response.is_success:
             sent_alert_ids = {alert.id for alert in selected_alerts if alert.id is not None}
             _record_digest_sent(config.user_id, tenant_id, now_ts, window_minutes, actionable_alerts, [])
@@ -1044,7 +1047,9 @@ async def _send_user_fast_digest(
     }
     try:
         async with httpx.AsyncClient(timeout=10) as client:
+            timer = HttpxTimer()
             response = await client.post(url, json=send_payload)
+        log_httpx_response(response, timer.elapsed(), log_error=False)
         if response.is_success:
             _record_fast_digest_sent(config.user_id, now_ts)
             logger.info(
@@ -1526,7 +1531,7 @@ def _log_alert_filter_decision(
     if decision.deliver:
         return
     alert_class = _resolve_alert_class(classification)
-    logger.info(
+    logger.debug(
         "alert_filtered alert_id=%s market_id=%s market_kind=%s alert_class=%s signal_type=%s confidence=%s "
         "band_applied=%s prob_used=%s within_band=%s reason=%s",
         alert.id,
@@ -1787,7 +1792,7 @@ def _log_copilot_evaluation(
             for evaluation in sorted(evaluations, key=lambda item: item.theme_key)
         ],
     }
-    logger.info(
+    logger.debug(
         "copilot_theme_eval user_id=%s plan_name=%s themes_total=%s themes_eligible_count=%s "
         "daily_count=%s daily_limit=%s daily_usage=%s sent_this_digest=%s digest_limit=%s digest_usage=%s "
         "cap_reached=%s selected_themes=%s themes=%s",
@@ -1851,7 +1856,7 @@ def _enqueue_ai_recommendations(
     themes = group_alerts_into_themes(actionable_alerts, classifier)
     actionable_theme_count = len(themes)
     if not themes:
-        logger.info(
+        logger.debug(
             "copilot_theme_counts user_id=%s actionable_themes=%s eligible_themes=%s sent=%s reason=no_themes",
             config.user_id,
             actionable_theme_count,
@@ -1974,7 +1979,7 @@ def _enqueue_ai_recommendations(
             reason = "all_themes_muted"
         elif skipped_pyes and skipped_pyes >= actionable_theme_count:
             reason = "all_outside_pyes_band"
-        logger.info(
+        logger.debug(
             "copilot_theme_counts user_id=%s actionable_themes=%s eligible_themes=%s sent=%s reason=%s",
             config.user_id,
             actionable_theme_count,
@@ -2036,7 +2041,7 @@ def _enqueue_ai_recommendations(
         if remaining_daily_by_speed.get(signal_speed, 0) <= 0:
             if signal_speed == SIGNAL_SPEED_STANDARD and cap_reached_reason is None:
                 cap_reached_reason = "daily"
-                logger.info(
+                logger.debug(
                     "copilot_cap_reached user_id=%s plan_name=%s daily=%s/%s digest=%s/%s",
                     config.user_id,
                     config.plan_name,
@@ -2049,7 +2054,7 @@ def _enqueue_ai_recommendations(
             continue
         if sent_this_digest >= digest_limit:
             cap_reached_reason = "digest"
-            logger.info(
+            logger.debug(
                 "copilot_cap_reached user_id=%s plan_name=%s daily=%s/%s digest=%s/%s",
                 config.user_id,
                 config.plan_name,
@@ -2075,7 +2080,7 @@ def _enqueue_ai_recommendations(
                 CopilotIneligibilityReason.COPILOT_DEDUPE_ACTIVE.value
             )
             dedupe_key = _copilot_theme_dedupe_key(config.user_id, theme.key, signal_speed)
-            logger.info(
+            logger.debug(
                 "copilot_theme_skip_dedupe user_id=%s theme_key=%s ttl_remaining=%s dedupe_key=%s scope=theme",
                 config.user_id,
                 theme.key,
@@ -2097,7 +2102,7 @@ def _enqueue_ai_recommendations(
         sent_this_digest += 1
         remaining_daily_by_speed[signal_speed] = remaining_daily_by_speed.get(signal_speed, 0) - 1
 
-    logger.info(
+    logger.debug(
         "copilot_theme_counts user_id=%s actionable_themes=%s eligible_themes=%s sent=%s",
         config.user_id,
         actionable_theme_count,

@@ -44,6 +44,7 @@ class Settings(BaseSettings):
 
     LOG_LEVEL: str = "INFO"
     LOG_JSON: bool = True
+    HTTPX_SLOW_REQUEST_THRESHOLD_SECONDS: float = 2.0
 
     @field_validator("POLY_ORDER", "POLY_ASCENDING", mode="before")
     @classmethod

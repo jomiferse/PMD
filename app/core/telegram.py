@@ -4,6 +4,7 @@ from typing import Any
 import httpx
 
 from ..settings import settings
+from ..http_logging import HttpxTimer, log_httpx_response
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,9 @@ def send_telegram_message(
 
     try:
         with httpx.Client(timeout=10) as client:
+            timer = HttpxTimer()
             response = client.post(url, json=payload)
+        log_httpx_response(response, timer.elapsed(), log_error=False)
         if response.is_success:
             return response.json()
         logger.error("telegram_send_failed status=%s body=%s", response.status_code, response.text[:200])
@@ -46,7 +49,9 @@ def answer_callback_query(callback_query_id: str, text: str | None = None) -> No
         payload["text"] = text
     try:
         with httpx.Client(timeout=10) as client:
-            client.post(url, json=payload)
+            timer = HttpxTimer()
+            response = client.post(url, json=payload)
+        log_httpx_response(response, timer.elapsed())
     except Exception:
         logger.exception("telegram_callback_exception")
 
@@ -64,6 +69,8 @@ def edit_message_reply_markup(
         payload["reply_markup"] = reply_markup
     try:
         with httpx.Client(timeout=10) as client:
-            client.post(url, json=payload)
+            timer = HttpxTimer()
+            response = client.post(url, json=payload)
+        log_httpx_response(response, timer.elapsed())
     except Exception:
         logger.exception("telegram_edit_markup_exception")

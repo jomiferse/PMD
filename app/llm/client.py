@@ -7,6 +7,7 @@ import redis
 from pydantic import BaseModel, ValidationError
 
 from ..settings import settings
+from ..http_logging import HttpxTimer, log_httpx_response
 
 logger = logging.getLogger(__name__)
 redis_conn = redis.from_url(settings.REDIS_URL)
@@ -49,7 +50,9 @@ def get_trade_recommendation(context: dict[str, Any]) -> dict[str, str]:
     for attempt in range(max(settings.LLM_MAX_RETRIES, 0) + 1):
         try:
             with httpx.Client(timeout=settings.LLM_TIMEOUT_SECONDS) as client:
+                timer = HttpxTimer()
                 response = client.post(settings.LLM_API_BASE, headers=headers, json=payload)
+            log_httpx_response(response, timer.elapsed(), log_error=False)
             if response.is_success:
                 response_data = response.json()
                 break

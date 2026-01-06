@@ -7,8 +7,10 @@ from .schemas import PolymarketMarket
 from ..settings import settings
 from ..core import defaults
 from ..core.market_links import normalize_slug
+from ..http_logging import HttpxTimer, log_httpx_response
 
 logger = logging.getLogger(__name__)
+ingestion_logger = logging.getLogger("app.ingestion.polymarket")
 
 
 class PolymarketClient:
@@ -144,7 +146,9 @@ class PolymarketClient:
     async def _fetch_events_page(
         self, client: httpx.AsyncClient, url: str, params: dict[str, str]
     ) -> list[dict]:
+        timer = HttpxTimer()
         r = await client.get(url, params=params)
+        log_httpx_response(r, timer.elapsed())
         r.raise_for_status()
         events = r.json()
         return events if isinstance(events, list) else []
@@ -448,7 +452,7 @@ def _log_ingestion_summary(
     volume_min: float | None,
     server_filters_enabled: bool,
 ) -> None:
-    logger.info(
+    ingestion_logger.info(
         "polymarket_ingestion_summary events_fetched=%s markets_parsed=%s markets_kept=%s "
         "liquidity_min=%s volume_min=%s server_filters_enabled=%s",
         events_fetched,

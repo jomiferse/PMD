@@ -70,10 +70,10 @@ def create_ai_recommendation(
     effective = get_effective_user_settings(user, db=db)
     signal_speed = signal_speed or SIGNAL_SPEED_STANDARD
     if not effective.copilot_enabled:
-        logger.info("ai_rec_skipped copilot_disabled user_id=%s", user.user_id)
+        logger.debug("ai_rec_skipped copilot_disabled user_id=%s", user.user_id)
         return None
     if _is_muted(db, user.user_id, alert.market_id, theme_key, now_ts):
-        logger.info(
+        logger.debug(
             "ai_rec_skipped muted user_id=%s market_id=%s theme_key=%s",
             user.user_id,
             alert.market_id,
@@ -101,7 +101,7 @@ def create_ai_recommendation(
         signal_speed=signal_speed,
     )
     if not claim.claimed:
-        logger.info(
+        logger.debug(
             "ai_rec_skipped reason=DEDUPE theme_key=%s ttl_remaining=%s user_id=%s dedupe_key=%s "
             "ttl_configured=%s scope=theme",
             theme_key,
@@ -151,7 +151,7 @@ def create_ai_recommendation(
         db.refresh(recommendation)
 
         record_ai_event(db, recommendation, "proposed", "ai_copilot_recommendation_created")
-        logger.info(
+        logger.debug(
             "ai_rec_created user_id=%s alert_id=%s recommendation=%s confidence=%s",
             user.user_id,
             alert.id,
@@ -159,7 +159,7 @@ def create_ai_recommendation(
             recommendation.confidence,
         )
         if recommendation.recommendation in {"WAIT", "SKIP"}:
-            logger.info(
+            logger.debug(
                 "ai_rec_hold_reason user_id=%s alert_id=%s rationale=%s",
                 user.user_id,
                 alert.id,
@@ -258,7 +258,7 @@ def _handle_confirm_skip(db: Session, rec_id: int, action: str, chat_id: str | N
         rec.status = REC_STATUS_CONFIRMED
         db.commit()
         record_ai_event(db, rec, "confirmed", "telegram_confirm")
-        logger.info("ai_rec_confirmed rec_id=%s user_id=%s", rec.id, rec.user_id)
+        logger.debug("ai_rec_confirmed rec_id=%s user_id=%s", rec.id, rec.user_id)
         if chat_id:
             _send_confirm_payload(db, str(chat_id), rec)
         return {"ok": True, "message": "Confirmed."}
@@ -266,7 +266,7 @@ def _handle_confirm_skip(db: Session, rec_id: int, action: str, chat_id: str | N
     rec.status = REC_STATUS_SKIPPED
     db.commit()
     record_ai_event(db, rec, "skipped", "telegram_skip")
-    logger.info("ai_rec_skipped rec_id=%s user_id=%s", rec.id, rec.user_id)
+    logger.debug("ai_rec_skipped rec_id=%s user_id=%s", rec.id, rec.user_id)
     if chat_id:
         send_telegram_message(str(chat_id), "Skipped.")
     return {"ok": True, "message": "Skipped."}
@@ -542,6 +542,15 @@ def _send_recommendation_message(
         message_id = response.get("result", {}).get("message_id")
         _increment_copilot_daily_count(rec.user_id, signal_speed=signal_speed)
         _increment_copilot_run_counter(run_id, "telegram_sends_succeeded", 1)
+        logger.info(
+            "copilot_decision_sent user_id=%s alert_id=%s rec_id=%s recommendation=%s confidence=%s signal_speed=%s",
+            user.user_id,
+            alert.id,
+            rec.id,
+            rec.recommendation,
+            rec.confidence,
+            signal_speed,
+        )
         if message_id:
             rec.telegram_message_id = str(message_id)
             db.commit()
