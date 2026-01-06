@@ -41,13 +41,22 @@ def _parse_bool(value: str | None) -> bool | None:
     raise SystemExit(f"invalid boolean value: {value}")
 
 
+def _parse_chat_id(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise SystemExit(f"invalid chat id: {value}") from exc
+
+
 def add_user(args: argparse.Namespace) -> None:
     db = SessionLocal()
     try:
         default_plan = db.query(Plan).filter(Plan.name == DEFAULT_PLAN_NAME).one_or_none()
         user = User(
             name=args.name,
-            telegram_chat_id=args.chat_id,
+            telegram_chat_id=_parse_chat_id(args.chat_id),
             is_active=True,
             plan_id=default_plan.id if default_plan else None,
             created_at=datetime.now(timezone.utc),

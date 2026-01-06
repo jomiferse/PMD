@@ -26,7 +26,7 @@ from .rate_limit import rate_limit
 from .settings import settings
 from .core.alerts import USER_DIGEST_LAST_PAYLOAD_KEY
 from .core.alert_classification import classify_alert_with_snapshots
-from .core.ai_copilot import COPILOT_LAST_STATUS_KEY, COPILOT_THEME_DEDUPE_KEY, handle_telegram_callback
+from .core.ai_copilot import COPILOT_LAST_STATUS_KEY, COPILOT_THEME_DEDUPE_KEY, handle_telegram_update
 from .core.effective_settings import invalidate_effective_settings_cache
 from .core.user_settings import get_effective_user_settings
 from .core.plans import recommended_plan_name
@@ -548,7 +548,7 @@ def admin_stats(
 @app.post("/telegram/webhook")
 async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
     payload = await request.json()
-    return handle_telegram_callback(db, payload)
+    return handle_telegram_update(db, payload)
 
 
 @app.get("/status")

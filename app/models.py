@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import String, Float, DateTime, Integer, Boolean, ForeignKey, func, UniqueConstraint, Index, text, Text, JSON
+from sqlalchemy import String, Float, DateTime, Integer, BigInteger, Boolean, ForeignKey, func, UniqueConstraint, Index, text, Text, JSON
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .db import Base
@@ -129,10 +129,13 @@ class Plan(Base):
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = (
+        UniqueConstraint("telegram_chat_id", name="uq_users_telegram_chat_id"),
+    )
 
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
-    telegram_chat_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    telegram_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     plan_id: Mapped[int | None] = mapped_column(ForeignKey("plans.id"), nullable=True)
     copilot_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -143,6 +146,15 @@ class User(Base):
     created_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), nullable=False)
 
     plan = relationship("Plan")
+
+
+class PendingTelegramChat(Base):
+    __tablename__ = "pending_telegram_chats"
+
+    telegram_chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    first_seen_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
 
 
 class UserAlertPreference(Base):

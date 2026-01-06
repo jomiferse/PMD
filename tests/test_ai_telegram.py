@@ -261,7 +261,7 @@ def test_callback_confirm_updates_status(db_session, monkeypatch):
     user = User(
         user_id=uuid4(),
         name="Trader",
-        telegram_chat_id="123",
+        telegram_chat_id=123,
         overrides_json={},
     )
     alert = _make_alert()
@@ -288,7 +288,7 @@ def test_callback_confirm_updates_status(db_session, monkeypatch):
         "callback_query": {
             "id": "1",
             "data": f"confirm:{rec.id}",
-            "message": {"chat": {"id": "123"}, "message_id": "999"},
+            "message": {"chat": {"id": 123}, "message_id": "999"},
         }
     }
     result = handle_telegram_callback(db_session, payload)
@@ -302,7 +302,7 @@ def test_confirm_payload_contains_market_link(db_session, monkeypatch):
     user = User(
         user_id=uuid4(),
         name="Trader",
-        telegram_chat_id="123",
+        telegram_chat_id=123,
         overrides_json={},
     )
     alert = _make_alert()
@@ -335,7 +335,7 @@ def test_confirm_payload_contains_market_link(db_session, monkeypatch):
         "callback_query": {
             "id": "2",
             "data": f"confirm:{rec.id}",
-            "message": {"chat": {"id": "123"}, "message_id": "1000"},
+            "message": {"chat": {"id": 123}, "message_id": "1000"},
         }
     }
     handle_telegram_callback(db_session, payload)
@@ -350,7 +350,7 @@ def test_duplicate_callback_id_is_idempotent(db_session, monkeypatch):
     user = User(
         user_id=uuid4(),
         name="Trader",
-        telegram_chat_id="123",
+        telegram_chat_id=123,
         overrides_json={},
     )
     alert = _make_alert()
@@ -414,7 +414,7 @@ def test_duplicate_callback_id_is_idempotent(db_session, monkeypatch):
         "callback_query": {
             "id": "dup-1",
             "data": f"confirm:{rec.id}",
-            "message": {"chat": {"id": "123"}, "message_id": "1002"},
+            "message": {"chat": {"id": 123}, "message_id": "1002"},
         }
     }
 
@@ -428,7 +428,7 @@ def test_status_transitions_are_idempotent(db_session, monkeypatch):
     user = User(
         user_id=uuid4(),
         name="Trader",
-        telegram_chat_id="123",
+        telegram_chat_id=123,
         overrides_json={},
     )
     alert = _make_alert()
@@ -455,7 +455,7 @@ def test_status_transitions_are_idempotent(db_session, monkeypatch):
         "callback_query": {
             "id": "confirm-1",
             "data": f"confirm:{rec.id}",
-            "message": {"chat": {"id": "123"}, "message_id": "1003"},
+            "message": {"chat": {"id": 123}, "message_id": "1003"},
         }
     }
     handle_telegram_callback(db_session, payload_confirm)
@@ -464,7 +464,7 @@ def test_status_transitions_are_idempotent(db_session, monkeypatch):
         "callback_query": {
             "id": "confirm-2",
             "data": f"confirm:{rec.id}",
-            "message": {"chat": {"id": "123"}, "message_id": "1003"},
+            "message": {"chat": {"id": 123}, "message_id": "1003"},
         }
     }
     second = handle_telegram_callback(db_session, payload_confirm_2)

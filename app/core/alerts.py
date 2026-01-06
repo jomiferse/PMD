@@ -68,7 +68,7 @@ DELIVERY_STATUS_FILTERED = "filtered"
 class UserDigestConfig:
     user_id: UUID
     name: str
-    telegram_chat_id: str | None
+    telegram_chat_id: int | None
     min_liquidity: float
     min_volume_24h: float
     min_abs_price_move: float

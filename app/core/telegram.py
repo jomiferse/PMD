@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 def send_telegram_message(
-    chat_id: str,
+    chat_id: str | int,
     text: str,
     reply_markup: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
@@ -57,7 +57,7 @@ def answer_callback_query(callback_query_id: str, text: str | None = None) -> No
 
 
 def edit_message_reply_markup(
-    chat_id: str,
+    chat_id: str | int,
     message_id: str,
     reply_markup: dict[str, Any] | None = None,
 ) -> None:

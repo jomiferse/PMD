@@ -3,6 +3,8 @@ import json
 import logging
 import re
 import time
+import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -18,6 +20,7 @@ from ..models import (
     AiThemeMute,
     Alert,
     MarketSnapshot,
+    PendingTelegramChat,
     User,
 )
 from ..settings import settings
@@ -48,6 +51,19 @@ COPILOT_RUN_KEY = "copilot:run:{run_id}"
 COPILOT_LAST_STATUS_KEY = "copilot:last_status:{user_id}"
 COPILOT_LAST_STATUS_TTL_SECONDS = 60 * 60 * 24
 COPILOT_RUN_TTL_SECONDS = 60 * 60 * 24
+START_PAYLOAD_PREFIX = "pmd_"
+START_FOOTER = ""
+START_MESSAGE_SUCCESS = "✅ Account linked. You will now receive PMD alerts here."
+START_MESSAGE_IDEMPOTENT = "✅ This chat is already linked."
+START_MESSAGE_NOT_FOUND = "❌ I can’t find that PMD account. Generate a new link from your PMD dashboard."
+START_MESSAGE_CONFLICT = (
+    "⚠️ This account/chat is already linked elsewhere. Unlink from your PMD dashboard and try again."
+)
+START_MESSAGE_PENDING = (
+    "👋 Welcome! To link your PMD account, go to PMD Dashboard → Telegram → Link account, "
+    "then open the Telegram link."
+)
+START_MESSAGE_INVALID = "❌ Invalid link. Generate a new link from your PMD dashboard."
 
 
 @dataclass(frozen=True)
@@ -231,7 +247,147 @@ def handle_telegram_callback(db: Session, payload: dict[str, Any]) -> dict[str, 
     return {"ok": False, "reason": "unknown_action"}
 
 
-def _handle_confirm_skip(db: Session, rec_id: int, action: str, chat_id: str | None) -> dict[str, Any]:
+def handle_telegram_update(db: Session, payload: dict[str, Any]) -> dict[str, Any]:
+    if payload.get("callback_query"):
+        return handle_telegram_callback(db, payload)
+
+    message = payload.get("message") or {}
+    text = message.get("text")
+    if not text:
+        return {"ok": True, "reason": "ignored"}
+
+    command = text.strip().split(maxsplit=1)[0]
+    if not command.startswith("/start"):
+        return {"ok": True, "reason": "ignored"}
+
+    return _handle_telegram_start(db, message, text)
+
+
+def _handle_telegram_start(db: Session, message: dict[str, Any], text: str) -> dict[str, Any]:
+    _log_event("start_received")
+    chat = message.get("chat") or {}
+    chat_id = _normalize_chat_id(chat.get("id"))
+    if chat_id is None:
+        _log_event("error")
+        return {"ok": False, "reason": "missing_chat_id"}
+
+    payload = _extract_start_payload(text)
+    if payload is None:
+        _upsert_pending_chat(db, chat_id)
+        _send_start_reply(chat_id, START_MESSAGE_PENDING)
+        return {"ok": True, "reason": "pending"}
+
+    if not payload.startswith(START_PAYLOAD_PREFIX):
+        _log_event("invalid_payload")
+        _upsert_pending_chat(db, chat_id)
+        _send_start_reply(chat_id, START_MESSAGE_INVALID)
+        return {"ok": False, "reason": "invalid_payload"}
+
+    user_id_raw = payload[len(START_PAYLOAD_PREFIX):].strip()
+    try:
+        user_id = uuid.UUID(user_id_raw)
+    except ValueError:
+        _log_event("invalid_payload")
+        _upsert_pending_chat(db, chat_id)
+        _send_start_reply(chat_id, START_MESSAGE_INVALID)
+        return {"ok": False, "reason": "invalid_payload"}
+
+    with _transaction(db):
+        user = db.query(User).filter(User.user_id == user_id).one_or_none()
+        if not user:
+            _log_event("user_not_found")
+            _send_start_reply(chat_id, START_MESSAGE_NOT_FOUND)
+            return {"ok": False, "reason": "user_not_found"}
+
+        existing = (
+            db.query(User)
+            .filter(User.telegram_chat_id == chat_id, User.user_id != user.user_id)
+            .first()
+        )
+        if existing:
+            _log_event("link_conflict")
+            _send_start_reply(chat_id, START_MESSAGE_CONFLICT)
+            return {"ok": False, "reason": "link_conflict"}
+
+        if user.telegram_chat_id is None:
+            user.telegram_chat_id = chat_id
+            db.query(PendingTelegramChat).filter(
+                PendingTelegramChat.telegram_chat_id == chat_id
+            ).delete(synchronize_session=False)
+            _log_event("link_success")
+            _send_start_reply(chat_id, START_MESSAGE_SUCCESS)
+            return {"ok": True, "reason": "link_success"}
+
+        if user.telegram_chat_id == chat_id:
+            _log_event("link_exists")
+            _send_start_reply(chat_id, START_MESSAGE_IDEMPOTENT)
+            return {"ok": True, "reason": "link_exists"}
+
+        _log_event("link_conflict")
+        _send_start_reply(chat_id, START_MESSAGE_CONFLICT)
+        return {"ok": False, "reason": "link_conflict"}
+
+
+def _extract_start_payload(text: str) -> str | None:
+    parts = text.strip().split(maxsplit=1)
+    if len(parts) < 2:
+        return None
+    payload = parts[1].strip()
+    return payload or None
+
+
+def _send_start_reply(chat_id: int, message: str) -> None:
+    text = f"{message}\n\n{START_FOOTER}" if START_FOOTER else message
+    send_telegram_message(str(chat_id), text)
+
+
+def _upsert_pending_chat(db: Session, chat_id: int) -> None:
+    now_ts = datetime.now(timezone.utc)
+    with _transaction(db):
+        existing = (
+            db.query(PendingTelegramChat)
+            .filter(PendingTelegramChat.telegram_chat_id == chat_id)
+            .one_or_none()
+        )
+        if existing:
+            existing.last_seen_at = now_ts
+            _log_event("pending_exists")
+            return
+
+        db.add(
+            PendingTelegramChat(
+                telegram_chat_id=chat_id,
+                first_seen_at=now_ts,
+                last_seen_at=now_ts,
+                status="pending",
+            )
+        )
+        _log_event("pending_created")
+
+
+def _normalize_chat_id(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _log_event(event: str) -> None:
+    logger.info(json.dumps({"event": event}))
+
+
+def _transaction(db: Session):
+    return db.begin() if not db.in_transaction() else nullcontext()
+
+
+def _handle_confirm_skip(
+    db: Session,
+    rec_id: int,
+    action: str,
+    chat_id: int | str | None,
+) -> dict[str, Any]:
     rec = db.query(AiRecommendation).filter(AiRecommendation.id == rec_id).one_or_none()
     if not rec:
         return {"ok": False, "reason": "recommendation_not_found"}
@@ -275,7 +431,7 @@ def _handle_confirm_skip(db: Session, rec_id: int, action: str, chat_id: str | N
 
 def _handle_mute(
     db: Session,
-    chat_id: str | None,
+    chat_id: int | str | None,
     from_user_id: str | int | None,
     target_type: str,
     target_key: str,
@@ -286,7 +442,7 @@ def _handle_mute(
     now_ts = datetime.now(timezone.utc)
     expires_at = now_ts + timedelta(minutes=max(minutes, 1))
     lookup_id = from_user_id if from_user_id is not None else chat_id
-    user = _lookup_user_by_chat(db, str(lookup_id) if lookup_id is not None else None)
+    user = _lookup_user_by_chat(db, lookup_id)
     if not user:
         return {"ok": False, "reason": "user_not_found"}
 
@@ -775,12 +931,13 @@ def _is_muted(db: Session, user_id, market_id: str, theme_key: str, now_ts: date
     )
 
 
-def _lookup_user_by_chat(db: Session, chat_id: str | None) -> User | None:
-    if not chat_id:
+def _lookup_user_by_chat(db: Session, chat_id: int | str | None) -> User | None:
+    normalized = _normalize_chat_id(chat_id)
+    if normalized is None:
         return None
     rows = (
         db.query(User)
-        .filter(User.telegram_chat_id == str(chat_id))
+        .filter(User.telegram_chat_id == normalized)
         .order_by(User.created_at.desc())
         .limit(2)
         .all()

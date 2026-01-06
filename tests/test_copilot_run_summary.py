@@ -130,7 +130,7 @@ def _make_config(user_id):
     return UserDigestConfig(
         user_id=user_id,
         name="Trader",
-        telegram_chat_id="12345",
+        telegram_chat_id=12345,
         min_liquidity=0.0,
         min_volume_24h=0.0,
         min_abs_price_move=0.0,
@@ -278,7 +278,7 @@ def test_copilot_run_summary_daily_cap_reached(db_session, monkeypatch):
 
 
 def test_llm_failure_releases_dedupe(db_session, monkeypatch):
-    user = User(user_id=uuid4(), name="Trader", telegram_chat_id="123", copilot_enabled=True)
+    user = User(user_id=uuid4(), name="Trader", telegram_chat_id=123, copilot_enabled=True)
     alert = _make_alert()
     db_session.add_all([user, alert])
     db_session.commit()
@@ -303,7 +303,7 @@ def test_llm_failure_releases_dedupe(db_session, monkeypatch):
 
 
 def test_telegram_failure_skips_daily_count_and_short_ttl(db_session, monkeypatch):
-    user = User(user_id=uuid4(), name="Trader", telegram_chat_id="123", copilot_enabled=True)
+    user = User(user_id=uuid4(), name="Trader", telegram_chat_id=123, copilot_enabled=True)
     alert = _make_alert()
     db_session.add_all([user, alert])
     db_session.commit()

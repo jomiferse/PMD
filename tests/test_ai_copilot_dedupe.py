@@ -116,7 +116,7 @@ def _make_alert(**overrides):
 
 
 def test_copilot_dedupe_skips_llm(db_session, monkeypatch):
-    user = User(user_id=uuid4(), name="Trader", telegram_chat_id="123", copilot_enabled=True)
+    user = User(user_id=uuid4(), name="Trader", telegram_chat_id=123, copilot_enabled=True)
     alert = _make_alert(title="Will the price of Bitcoin be above $50 on Jan 5 2026?")
     db_session.add_all([user, alert])
     db_session.commit()
@@ -155,7 +155,7 @@ def test_copilot_theme_dedupe_ttl_respected(db_session, monkeypatch):
     user = User(
         user_id=uuid4(),
         name="Trader",
-        telegram_chat_id="123",
+        telegram_chat_id=123,
         copilot_enabled=True,
         overrides_json={
             "copilot_theme_ttl_minutes": 1,
@@ -211,7 +211,7 @@ def test_copilot_dedupe_shortens_on_send_failure(db_session, monkeypatch):
     user = User(
         user_id=uuid4(),
         name="Trader",
-        telegram_chat_id="123",
+        telegram_chat_id=123,
         copilot_enabled=True,
         overrides_json={
             "copilot_theme_ttl_minutes": 1,

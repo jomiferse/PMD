@@ -50,7 +50,7 @@ def _make_pref(enabled: bool) -> UserDigestConfig:
     return UserDigestConfig(
         user_id=uuid4(),
         name="Trader",
-        telegram_chat_id="12345",
+        telegram_chat_id=12345,
         min_liquidity=0.0,
         min_volume_24h=0.0,
         min_abs_price_move=0.0,
