@@ -282,7 +282,11 @@ def _resolve_user_preferences(
     digest_window_minutes = effective.digest_window_minutes
     max_alerts_per_digest = effective.max_alerts_per_digest
     ai_copilot_enabled = effective.copilot_enabled
+    fast_mode = str(getattr(effective, "fast_mode", "WATCH_ONLY")).upper()
+    if fast_mode not in {"WATCH_ONLY", "FULL"}:
+        fast_mode = "WATCH_ONLY"
     fast_signals_enabled = effective.fast_signals_enabled
+    allow_fast_alerts = bool(effective.allow_fast_alerts) and fast_mode == "FULL"
     return UserDigestConfig(
         user_id=user.user_id,
         name=user.name,
@@ -307,7 +311,7 @@ def _resolve_user_preferences(
         p_strict_min=float(effective.p_strict_min),
         p_strict_max=float(effective.p_strict_max),
         allow_info_alerts=bool(effective.allow_info_alerts),
-        allow_fast_alerts=bool(effective.allow_fast_alerts),
+        allow_fast_alerts=allow_fast_alerts,
         plan_name=effective.plan_name,
         max_copilot_per_day=max(int(effective.max_copilot_per_day), 0),
         max_fast_copilot_per_day=max(int(effective.max_fast_copilot_per_day), 0),
@@ -2515,7 +2519,7 @@ def _build_cap_reached_message(
 ) -> str | None:
     if not cap_reached:
         return None
-    plan_label = (config.plan_name or "basic").upper()
+    plan_label = (config.plan_name or "free").upper()
     if cap_reached == "daily":
         usage_text = daily_usage
         period_label = "today"
@@ -2764,13 +2768,18 @@ def _extract_underlying(text: str) -> str | None:
 def _copilot_skip_note(config: UserDigestConfig, result: CopilotEnqueueResult | None) -> str | None:
     if result is None or result.enqueued > 0:
         return None
-    if (config.plan_name or "").lower() != "elite":
-        return None
     if result.cap_reached_reason:
         period = "hour" if result.cap_reached_reason == "hourly" else "day"
         if result.cap_reached_reason == "digest":
             period = "digest"
         return f"Copilot skipped: CAP_REACHED ({period})"
+    reasons = {reason for evaluation in result.evaluations for reason in evaluation.reasons}
+    if CopilotIneligibilityReason.CAP_REACHED.value in reasons:
+        return "Copilot skipped: CAP_REACHED"
+    if CopilotIneligibilityReason.PLAN_DISABLED.value in reasons:
+        return "Copilot skipped: PLAN_DISABLED"
+    if CopilotIneligibilityReason.USER_DISABLED.value in reasons:
+        return "Copilot skipped: USER_DISABLED"
     dedupe_hit = any(
         CopilotIneligibilityReason.COPILOT_DEDUPE_ACTIVE.value in evaluation.reasons
         for evaluation in result.evaluations
