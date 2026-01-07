@@ -374,6 +374,8 @@ async def _send_user_digest(
         "after_actionable_count": 0,
         "after_caps_count": 0,
         "delivered_count": 0,
+        "strong_count": 0,
+        "plan_name": config.plan_name,
     }
     filter_reasons_by_alert_id: dict[int, list[str]] = {}
     filter_reason_events: list[str] = []
@@ -417,6 +419,9 @@ async def _send_user_digest(
         .all()
     )
     metrics["candidate_alerts_count"] = len(rows)
+    metrics["strong_count"] = sum(
+        1 for alert in rows if alert.strength == AlertStrength.STRONG.value
+    )
     if not rows:
         _emit_copilot_run_summary(
             run_id=run_id,
@@ -438,6 +443,26 @@ async def _send_user_digest(
             telegram_sends_attempted=0,
             telegram_sends_succeeded=0,
         )
+        if config.telegram_chat_id:
+            no_alerts_text = _format_no_alerts_message(window_minutes)
+            url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/sendMessage"
+            payload = {
+                "chat_id": config.telegram_chat_id,
+                "text": no_alerts_text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            }
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    timer = HttpxTimer()
+                    response = await client.post(url, json=payload)
+                log_httpx_response(response, timer.elapsed(), log_error=False)
+                if response.is_success:
+                    _record_digest_sent(config.user_id, tenant_id, now_ts, window_minutes, [], [])
+                    _log_digest_metrics(config.user_id, metrics, filter_reason_events)
+                    return {"user_id": str(config.user_id), "sent": True, "reason": "no_alerts"}
+            except Exception:
+                logger.exception("telegram_send_failed user_id=%s", config.user_id)
         _log_digest_metrics(config.user_id, metrics, filter_reason_events)
         return {"user_id": str(config.user_id), "sent": False, "reason": "no_alerts"}
 
@@ -551,7 +576,8 @@ async def _send_user_digest(
     selected_alerts = list(selected_actionable)
     remaining_slots = max(max_alerts - len(selected_actionable), 0)
     info_slots = max_alerts if not selected_actionable else remaining_slots
-    if config.allow_info_alerts and info_slots > 0 and info_ranked:
+    allow_watchlist = config.allow_info_alerts or _is_basic_plan(config.plan_name)
+    if allow_watchlist and info_slots > 0 and info_ranked:
         selected_info = info_ranked[:info_slots]
         selected_alerts.extend(selected_info)
         for alert in info_ranked[info_slots:]:
@@ -600,6 +626,34 @@ async def _send_user_digest(
     attach_market_slugs(db, selected_alerts)
 
     if not selected_alerts:
+        no_alerts_text = _format_no_alerts_message(window_minutes)
+        url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": config.telegram_chat_id,
+            "text": no_alerts_text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                timer = HttpxTimer()
+                response = await client.post(url, json=payload)
+            log_httpx_response(response, timer.elapsed(), log_error=False)
+            if response.is_success:
+                _record_digest_sent(config.user_id, tenant_id, now_ts, window_minutes, [], [])
+                _record_alert_deliveries(
+                    db,
+                    filtered_for_delivery,
+                    included_for_delivery,
+                    config.user_id,
+                    now_ts,
+                    sent_alert_ids=set(),
+                    filter_reasons=filter_reasons_by_alert_id,
+                )
+                _log_digest_metrics(config.user_id, metrics, filter_reason_events)
+                return {"user_id": str(config.user_id), "sent": True, "reason": "no_selected_alerts"}
+        except Exception:
+            logger.exception("telegram_send_failed user_id=%s", config.user_id)
         _record_alert_deliveries(
             db,
             filtered_for_delivery,
@@ -636,6 +690,7 @@ async def _send_user_digest(
         classifier=classifier,
         db=db,
         now_ts=now_ts,
+        plan_name=config.plan_name,
     )
     if not text:
         _record_alert_deliveries(
@@ -987,23 +1042,15 @@ def _log_digest_metrics(
     filter_reason_events: list[str] | None,
 ) -> None:
     counter = Counter(filter_reason_events or [])
-    top_reasons = counter.most_common(3)
-    top_summary = ",".join(f"{reason}:{count}" for reason, count in top_reasons)
+    reason_counts = dict(counter)
     logger.info(
-        (
-            "digest_metrics user_id=%s candidate_alerts_count=%s "
-            "after_pref_filter_count=%s after_strength_gate_count=%s after_p_band_count=%s "
-            "after_actionable_count=%s after_caps_count=%s delivered_count=%s top_filter_reasons=%s"
-        ),
+        "digest_summary plan=%s user_id=%s candidate=%s strong_count=%s delivered=%s filtered_by_reason_counts=%s",
+        metrics.get("plan_name"),
         user_id,
         metrics.get("candidate_alerts_count", 0),
-        metrics.get("after_pref_filter_count", 0),
-        metrics.get("after_strength_gate_count", 0),
-        metrics.get("after_p_band_count", 0),
-        metrics.get("after_actionable_count", 0),
-        metrics.get("after_caps_count", 0),
+        metrics.get("strong_count", 0),
         metrics.get("delivered_count", 0),
-        top_summary or "none",
+        json.dumps(reason_counts, ensure_ascii=True, sort_keys=True),
     )
 
 
@@ -1193,6 +1240,22 @@ def _dedupe_by_market_id(
     return deduped
 
 
+def _is_basic_plan(plan_name: str | None) -> bool:
+    return (plan_name or "").strip().lower() == "basic"
+
+
+def _watchlist_label(plan_name: str | None, classification: AlertClassification) -> str | None:
+    if _is_basic_plan(plan_name) and _resolve_alert_class(classification) == AlertClass.INFO_ONLY:
+        return "Watchlist (Basic)"
+    return None
+
+
+def _format_no_alerts_message(window_minutes: int) -> str:
+    header = f"<b>PMD - {window_minutes}m</b>"
+    lines = [header, "", "No alerts matched your current filters.", "", READ_ONLY_DISCLAIMER]
+    return "\n".join(lines).strip()
+
+
 def _format_digest_message(
     alerts: list[Alert],
     window_minutes: int,
@@ -1203,6 +1266,7 @@ def _format_digest_message(
     classifier=None,
     db: Session | None = None,
     now_ts: datetime | None = None,
+    plan_name: str | None = None,
 ) -> str:
     if not alerts:
         return ""
@@ -1222,6 +1286,7 @@ def _format_digest_message(
             classifier,
             db=db,
             now_ts=now_ts,
+            plan_name=plan_name,
         )
 
     header_label = f"{actionable_included} actionable repricings" if actionable_included else f"{len(alerts)} signals"
@@ -1233,7 +1298,17 @@ def _format_digest_message(
         classification = classifier(alert) if classifier else classify_alert(alert)
         if _is_actionable_classification(classification):
             actionable_displayed += 1
-        lines.extend(_format_digest_alert(alert, idx, window_minutes, classifier, classification=classification))
+        watchlist_label = _watchlist_label(plan_name, classification)
+        lines.extend(
+            _format_digest_alert(
+                alert,
+                idx,
+                window_minutes,
+                classifier,
+                classification=classification,
+                watchlist_label=watchlist_label,
+            )
+        )
         lines.append("")
 
     remaining_actionable = total_actionable - actionable_displayed
@@ -1332,6 +1407,7 @@ def _format_grouped_digest_message(
     classifier=None,
     db: Session | None = None,
     now_ts: datetime | None = None,
+    plan_name: str | None = None,
 ) -> str:
     themes = group_alerts_into_themes(alerts, classifier)
     max_themes = max(max_themes_per_digest or defaults.DEFAULT_MAX_THEMES_PER_DIGEST, 1)
@@ -1353,9 +1429,11 @@ def _format_grouped_digest_message(
         rep_move = _format_compact_move(rep)
         rep_p_yes = _format_p_yes_compact(rep)
         rep_liq, rep_vol = _format_liquidity_descriptors(rep)
-        lines.append(
-            f"Rep: {rep_title} | Move {rep_move} | {rep_p_yes} | Liq {rep_liq} | Vol {rep_vol}"
-        )
+        watchlist_label = _watchlist_label(plan_name, theme.representative_classification)
+        rep_line = f"Rep: {rep_title} | Move {rep_move} | {rep_p_yes} | Liq {rep_liq} | Vol {rep_vol}"
+        if watchlist_label:
+            rep_line = f"{rep_line} | {watchlist_label}"
+        lines.append(rep_line)
         evidence_line = evidence_by_market.get(rep.market_id)
         if evidence_line:
             lines.append(evidence_line)
@@ -1478,10 +1556,11 @@ def _format_digest_alert(
     window_minutes: int,
     classifier=None,
     classification: AlertClassification | None = None,
+    watchlist_label: str | None = None,
 ) -> list[str]:
     title = html.escape(alert.title[:120])
     classification = classification or (classifier(alert) if classifier else classify_alert(alert))
-    rank_label = _rank_label_for_class(_resolve_alert_class(classification))
+    rank_label = watchlist_label or _rank_label_for_class(_resolve_alert_class(classification))
     move_text = _format_move(alert)
     p_yes_text = _format_p_yes(alert)
     liquidity_text = _format_liquidity_volume(alert)
@@ -1532,16 +1611,49 @@ def _rank_digest_alerts(alerts: list[Alert]) -> list[Alert]:
 
 def _resolve_alert_class(classification: AlertClassification) -> AlertClass:
     if classification.alert_class is not None:
-        return classification.alert_class
-    signal = (classification.signal_type or "").upper()
-    confidence = (classification.confidence or "").upper()
-    if signal in {"REPRICING", "LIQUIDITY_SWEEP"} and confidence == "HIGH":
-        return AlertClass.ACTIONABLE_FAST
-    if signal in {"REPRICING", "LIQUIDITY_SWEEP"}:
-        return AlertClass.ACTIONABLE_STANDARD
-    if signal == "MOMENTUM" and confidence in {"HIGH", "MEDIUM"}:
-        return AlertClass.ACTIONABLE_STANDARD
-    return AlertClass.INFO_ONLY
+        alert_class = classification.alert_class
+    else:
+        signal = (classification.signal_type or "").upper()
+        confidence = (classification.confidence or "").upper()
+        if signal in {"REPRICING", "LIQUIDITY_SWEEP"} and confidence == "HIGH":
+            alert_class = AlertClass.ACTIONABLE_FAST
+        elif signal in {"REPRICING", "LIQUIDITY_SWEEP"}:
+            alert_class = AlertClass.ACTIONABLE_STANDARD
+        elif signal == "MOMENTUM" and confidence in {"HIGH", "MEDIUM"}:
+            alert_class = AlertClass.ACTIONABLE_STANDARD
+        else:
+            alert_class = AlertClass.INFO_ONLY
+
+    suggested_action = (classification.suggested_action or "").upper()
+    if alert_class in {AlertClass.ACTIONABLE_FAST, AlertClass.ACTIONABLE_STANDARD} and suggested_action != "FOLLOW":
+        return AlertClass.INFO_ONLY
+    return alert_class
+
+
+def _missing_actionability_data(alert: Alert) -> bool:
+    has_price = alert.old_price is not None and alert.new_price is not None
+    has_move = alert.move is not None
+    has_delta = alert.delta_pct is not None
+    return not (has_price or has_move or has_delta)
+
+
+def _has_invalid_mapping(alert: Alert) -> bool:
+    mapping_confidence = getattr(alert, "mapping_confidence", None)
+    return mapping_confidence is not None and mapping_confidence != "verified"
+
+
+def _is_actionability_invalid(alert: Alert) -> bool:
+    if not str(getattr(alert, "market_id", "") or "").strip():
+        return True
+    if _get_probability_for_band(alert) is None:
+        return True
+    if _missing_actionability_data(alert):
+        return True
+    if alert.liquidity is None or alert.volume_24h is None:
+        return True
+    if _has_invalid_mapping(alert):
+        return True
+    return False
 
 
 def _evaluate_delivery_decision(
@@ -1550,8 +1662,7 @@ def _evaluate_delivery_decision(
     config: UserDigestConfig,
 ) -> DeliveryDecision:
     alert_class = _resolve_alert_class(classification)
-    suggested_action = (classification.suggested_action or "").upper()
-    if alert_class in {AlertClass.ACTIONABLE_FAST, AlertClass.ACTIONABLE_STANDARD} and suggested_action != "FOLLOW":
+    if _is_actionability_invalid(alert):
         return DeliveryDecision(
             deliver=False,
             alert_class=alert_class,
@@ -1597,7 +1708,8 @@ def _evaluate_delivery_decision(
 
     band_applied = "strict"
     prob_within, prob_value = _is_within_probability_band(alert, config.p_strict_min, config.p_strict_max)
-    if not config.allow_info_alerts:
+    allow_watchlist = config.allow_info_alerts or _is_basic_plan(config.plan_name)
+    if not allow_watchlist:
         return DeliveryDecision(
             deliver=False,
             alert_class=alert_class,

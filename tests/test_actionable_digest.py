@@ -178,10 +178,11 @@ def test_wait_alerts_do_not_trigger_digest(db_session, monkeypatch):
     payloads = []
     _install_fake_telegram(monkeypatch, payloads)
 
-    result = asyncio.run(_send_user_digest(db_session, "tenant-1", _make_config()))
-    assert result["sent"] is False
+    config = _make_config(allow_info_alerts=False, allow_fast_alerts=False)
+    result = asyncio.run(_send_user_digest(db_session, "tenant-1", config))
+    assert result["sent"] is True
     assert result["reason"] == "no_selected_alerts"
-    assert not payloads
+    assert payloads
 
 
 def test_pyes_bounds_filter_excludes_alerts(db_session, monkeypatch):
@@ -196,10 +197,14 @@ def test_pyes_bounds_filter_excludes_alerts(db_session, monkeypatch):
 
     monkeypatch.setattr("app.core.alerts.classify_alert_with_snapshots", _fake_classify)
 
+    payloads = []
+    _install_fake_telegram(monkeypatch, payloads)
+
     config = _make_config(p_min=0.15, p_max=0.85)
     result = asyncio.run(_send_user_digest(db_session, "tenant-1", config))
-    assert result["sent"] is False
+    assert result["sent"] is True
     assert result["reason"] == "no_selected_alerts"
+    assert payloads
 
 
 def test_digest_sends_only_with_actionable_alerts(db_session, monkeypatch):
@@ -434,7 +439,8 @@ def test_medium_filtered_when_only_strong_allowed(db_session, monkeypatch):
     result = asyncio.run(_send_user_digest(db_session, "tenant-1", config))
     deliveries = db_session.query(AlertDelivery).all()
 
-    assert result["sent"] is False
+    assert result["sent"] is True
+    assert payloads
     assert deliveries and deliveries[0].delivery_status == "filtered"
     assert deliveries[0].filter_reasons == [FilterReason.STRENGTH_NOT_ALLOWED.value]
 
@@ -624,7 +630,7 @@ def test_llm_error_footer_visible(db_session, monkeypatch):
     assert "Copilot skipped: LLM_ERROR" in payloads[0]["text"]
 
 
-def test_info_only_blocked_on_basic_plan(db_session, monkeypatch):
+def test_info_only_watchlist_on_basic_plan(db_session, monkeypatch):
     _patch_digest_helpers(monkeypatch)
 
     alert = _make_alert(market_id="market-info")
@@ -636,13 +642,17 @@ def test_info_only_blocked_on_basic_plan(db_session, monkeypatch):
         lambda *_args, **_kwargs: AlertClassification("NOISY", "LOW", "IGNORE"),
     )
 
-    config = _make_config(allow_info_alerts=False, allow_fast_alerts=False)
+    payloads = []
+    _install_fake_telegram(monkeypatch, payloads)
+
+    config = _make_config(allow_info_alerts=True, allow_fast_alerts=False, plan_name="basic")
     result = asyncio.run(_send_user_digest(db_session, "tenant-1", config))
     deliveries = db_session.query(AlertDelivery).all()
 
-    assert result["sent"] is False
-    assert deliveries
-    assert deliveries[0].filter_reasons == [FilterReason.INFO_ONLY_BLOCKED.value]
+    assert result["sent"] is True
+    assert payloads
+    assert "Watchlist (Basic)" in payloads[0]["text"]
+    assert deliveries and deliveries[0].delivery_status == "sent"
 
 
 def test_info_only_delivered_on_pro_plan(db_session, monkeypatch):
@@ -668,6 +678,36 @@ def test_info_only_delivered_on_pro_plan(db_session, monkeypatch):
     assert deliveries and deliveries[0].delivery_status == "sent"
 
 
+def test_valid_strong_alert_not_non_actionable(db_session, monkeypatch):
+    _patch_digest_helpers(monkeypatch)
+
+    alert = _make_alert(
+        market_id="market-valid",
+        liquidity=15000.0,
+        volume_24h=15000.0,
+        market_p_yes=0.55,
+    )
+    db_session.add(alert)
+    db_session.commit()
+
+    monkeypatch.setattr(
+        "app.core.alerts.classify_alert_with_snapshots",
+        lambda *_args, **_kwargs: AlertClassification("LIQUIDITY_SWEEP", "MEDIUM", "WAIT"),
+    )
+    payloads = []
+    _install_fake_telegram(monkeypatch, payloads)
+
+    config = _make_config(allow_info_alerts=False, allow_fast_alerts=False)
+    result = asyncio.run(_send_user_digest(db_session, "tenant-1", config))
+    deliveries = db_session.query(AlertDelivery).all()
+
+    assert result["sent"] is True
+    assert payloads
+    assert deliveries
+    assert FilterReason.NON_ACTIONABLE.value not in deliveries[0].filter_reasons
+    assert deliveries[0].filter_reasons == [FilterReason.INFO_ONLY_BLOCKED.value]
+
+
 def test_band_differs_by_classification(db_session, monkeypatch):
     _patch_digest_helpers(monkeypatch)
 
@@ -678,10 +718,13 @@ def test_band_differs_by_classification(db_session, monkeypatch):
 
     def _fake_classify(_, alert_arg):
         if alert_arg.market_id == "market-standard":
-            return AlertClassification("LIQUIDITY_SWEEP", "MEDIUM", "WAIT")
+            return AlertClassification("REPRICING", "MEDIUM", "FOLLOW")
         return AlertClassification("NOISY", "LOW", "IGNORE")
 
     monkeypatch.setattr("app.core.alerts.classify_alert_with_snapshots", _fake_classify)
+
+    payloads = []
+    _install_fake_telegram(monkeypatch, payloads)
 
     config = _make_config(allow_info_alerts=True, allow_fast_alerts=False)
     result = asyncio.run(_send_user_digest(db_session, "tenant-1", config))
@@ -690,10 +733,11 @@ def test_band_differs_by_classification(db_session, monkeypatch):
         for delivery in db_session.query(AlertDelivery).all()
     }
 
-    assert result["sent"] is False
+    assert result["sent"] is True
+    assert payloads
     standard_delivery = deliveries.get(standard_alert.id)
     info_delivery = deliveries.get(info_alert.id)
     assert standard_delivery is not None
     assert info_delivery is not None
-    assert FilterReason.NON_ACTIONABLE.value in standard_delivery.filter_reasons
+    assert FilterReason.P_OUT_OF_BAND.value in standard_delivery.filter_reasons
     assert FilterReason.STRICT_BAND_BLOCKED.value in info_delivery.filter_reasons

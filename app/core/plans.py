@@ -177,11 +177,11 @@ class PlanAlertRules:
 
 PLAN_ALERT_RULES: dict[str, PlanAlertRules] = {
     "basic": PlanAlertRules(
-        allow_info_alerts=False,
+        allow_info_alerts=True,
         allow_fast_alerts=False,
         soft_band=(defaults.DEFAULT_SOFT_P_MIN, defaults.DEFAULT_SOFT_P_MAX),
         strict_band=(defaults.DEFAULT_STRICT_P_MIN, defaults.DEFAULT_STRICT_P_MAX),
-        allowed_classes=(AlertClass.ACTIONABLE_STANDARD,),
+        allowed_classes=(AlertClass.ACTIONABLE_STANDARD, AlertClass.INFO_ONLY),
     ),
     "pro": PlanAlertRules(
         allow_info_alerts=True,

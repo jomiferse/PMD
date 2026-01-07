@@ -170,7 +170,7 @@ def test_ai_enqueue_only_actionable_alerts(db_session, monkeypatch):
     monkeypatch.setattr("app.core.alerts.httpx.AsyncClient", _FakeClient)
 
     result = asyncio.run(_send_user_digest(db_session, "tenant-1", _make_config(user_id)))
-    assert result["sent"] is False
+    assert result["sent"] is True
     assert not enqueued
 
 
