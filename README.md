@@ -9,7 +9,9 @@ PMD is a read-only analytics service that detects Polymarket mispricings and del
 - Effective settings per user (code defaults -> plan -> user overrides)
 - Telegram digests + AI Copilot (manual execution only, no order sizing)
 
-## Quick start (fresh DB)
+## Quick start (fresh DB, dev compose)
+
+Note: dev/prod use separate compose files at repo root and separate Dockerfiles under `docker/`.
 
 1) Copy the env file and fill required values:
 
@@ -20,25 +22,25 @@ cp .env.example .env
 2) Build and start services:
 
 ```bash
-docker compose up -d --build
+docker compose -f docker-compose.dev.yml up -d --build
 ```
 
 3) Run migrations:
 
 ```bash
-docker compose exec api alembic upgrade head
+docker compose -f docker-compose.dev.yml exec api alembic upgrade head
 ```
 
 4) Seed pricing plans (assigns all users to Basic):
 
 ```bash
-docker compose exec api python -m app.scripts.seed_plans
+docker compose -f docker-compose.dev.yml exec api python -m app.scripts.seed_plans
 ```
 
 5) Create an API key (prints the raw key once):
 
 ```bash
-docker compose exec api python -m app.scripts.create_api_key --name prod
+docker compose -f docker-compose.dev.yml exec api python -m app.scripts.create_api_key --name prod
 ```
 
 6) Call endpoints:
@@ -52,7 +54,7 @@ curl -H "X-API-Key: <key>" http://localhost:8000/alerts/latest
 The database is disposable. If you need a clean reset, drop the database and run:
 
 ```bash
-docker compose exec api alembic upgrade head
+docker compose -f docker-compose.dev.yml exec api alembic upgrade head
 ```
 
 ## Configuration model
@@ -124,37 +126,37 @@ minimums if unset; server-side filters reduce payloads but local safeguards stil
 Seed plans:
 
 ```bash
-docker compose exec api python -m app.scripts.seed_plans
+docker compose -f docker-compose.dev.yml exec api python -m app.scripts.seed_plans
 ```
 
 Create or update a plan:
 
 ```bash
-docker compose exec api python -m app.scripts.create_plan --name pro --max-copilot-per-day 3
+docker compose -f docker-compose.dev.yml exec api python -m app.scripts.create_plan --name pro --max-copilot-per-day 3
 ```
 
 Assign a plan:
 
 ```bash
-docker compose exec api python -m app.scripts.assign_plan --user Alice --plan-name pro
+docker compose -f docker-compose.dev.yml exec api python -m app.scripts.assign_plan --user Alice --plan-name pro
 ```
 
 Add a user:
 
 ```bash
-docker compose exec api python -m app.scripts.manage_users add --name "Alice" --chat-id -12345
+docker compose -f docker-compose.dev.yml exec api python -m app.scripts.manage_users add --name "Alice" --chat-id -12345
 ```
 
 Update preferences:
 
 ```bash
-docker compose exec api python -m app.scripts.manage_users set-pref --user Alice --min-liquidity 50000
+docker compose -f docker-compose.dev.yml exec api python -m app.scripts.manage_users set-pref --user Alice --min-liquidity 50000
 ```
 
 Send a test Telegram message:
 
 ```bash
-docker compose exec api python -m app.scripts.manage_users test --user Alice
+docker compose -f docker-compose.dev.yml exec api python -m app.scripts.manage_users test --user Alice
 ```
 
 ## AI Copilot (manual execution)
@@ -199,8 +201,26 @@ Each digest run emits a `copilot_run_summary` log with per-user counts and skip 
 Copilot debug harness (dry run):
 
 ```bash
-docker compose exec api python -m app.scripts.copilot_debug --user-id <uuid> --alert-id <alert_id>
+docker compose -f docker-compose.dev.yml exec api python -m app.scripts.copilot_debug --user-id <uuid> --alert-id <alert_id>
 ```
+
+## Production deployment
+
+Build and start production services (no source mounts, internal db/redis):
+
+```bash
+docker compose -f docker-compose.prod.yml up -d --build
+```
+
+Run migrations as a one-off job:
+
+```bash
+docker compose -f docker-compose.prod.yml run --rm migrate
+```
+
+Notes:
+- Provide required env vars in the shell or your production orchestrator; `.env` is intended for local use.
+- Persistence uses named volumes `pgdata` and `redisdata`. Back up those volumes regularly if you need data retention.
 
 ## Safety
 
