@@ -86,6 +86,13 @@ def create_ai_recommendation(
     theme_key = _theme_key_for_alert(alert)
     effective = get_effective_user_settings(user, db=db)
     signal_speed = signal_speed or SIGNAL_SPEED_STANDARD
+    full_ttl_minutes = max(int(effective.copilot_theme_ttl_minutes), 1)
+    full_ttl_seconds = max(full_ttl_minutes * 60, 60)
+    failure_ttl_seconds = min(
+        full_ttl_seconds,
+        max(int(defaults.COPILOT_DEDUPE_FAILURE_TTL_SECONDS), 60),
+    )
+    pending_ttl_minutes = max(int(failure_ttl_seconds / 60), 1)
     if not effective.copilot_enabled:
         logger.debug("ai_rec_skipped copilot_disabled user_id=%s", user.user_id)
         return None
@@ -114,7 +121,7 @@ def create_ai_recommendation(
     claim = _claim_copilot_theme(
         user.user_id,
         theme_key,
-        effective.copilot_theme_ttl_minutes,
+        pending_ttl_minutes,
         signal_speed=signal_speed,
     )
     if not claim.claimed:
@@ -144,7 +151,13 @@ def create_ai_recommendation(
             window_minutes=window_minutes,
         )
         _increment_copilot_run_counter(run_id, "llm_calls_attempted", 1)
-        llm_result = get_trade_recommendation(llm_context)
+        try:
+            llm_result = get_trade_recommendation(llm_context)
+        except Exception:
+            _increment_copilot_run_counter(run_id, "llm_calls_failed", 1)
+            logger.exception("copilot_llm_failed user_id=%s alert_id=%s", user.user_id, alert.id)
+            _release_copilot_theme(claim.key, failure_ttl_seconds)
+            return None
         llm_result = _apply_fast_recommendation_rules(
             llm_result,
             alert,
@@ -192,11 +205,13 @@ def create_ai_recommendation(
             signal_speed=signal_speed,
             window_minutes=window_minutes,
         )
-        if not sent:
-            _release_copilot_theme(claim.key, defaults.COPILOT_DEDUPE_FAILURE_TTL_SECONDS)
+        if sent:
+            _extend_copilot_theme_ttl(claim.key, full_ttl_seconds)
+        else:
+            _release_copilot_theme(claim.key, failure_ttl_seconds)
         return recommendation
     except Exception:
-        _release_copilot_theme(claim.key, defaults.COPILOT_DEDUPE_FAILURE_TTL_SECONDS)
+        _release_copilot_theme(claim.key, failure_ttl_seconds)
         raise
 
 
@@ -679,9 +694,29 @@ def _maybe_log_copilot_run(run_id: str | None) -> None:
                 "llm_calls_succeeded": _get_int("llm_calls_succeeded"),
                 "telegram_sends_attempted": _get_int("telegram_sends_attempted"),
                 "telegram_sends_succeeded": _get_int("telegram_sends_succeeded"),
+                "sent": _get_int("telegram_sends_succeeded"),
+                "window": summary.get("digest_window_minutes"),
+                "selected": summary.get("themes_selected"),
                 "duration_ms": int((time.time() - started_at) * 1000),
             }
         )
+        reason_counts = summary.get("skipped_by_reason_counts") or {}
+        if not isinstance(reason_counts, dict):
+            reason_counts = {}
+        llm_failures = max(
+            int(summary.get("llm_calls_attempted") or 0) - int(summary.get("llm_calls_succeeded") or 0),
+            0,
+        )
+        if llm_failures:
+            reason_counts["LLM_ERROR"] = reason_counts.get("LLM_ERROR", 0) + llm_failures
+        telegram_failures = max(
+            int(summary.get("telegram_sends_attempted") or 0)
+            - int(summary.get("telegram_sends_succeeded") or 0),
+            0,
+        )
+        if telegram_failures:
+            reason_counts["TELEGRAM_ERROR"] = reason_counts.get("TELEGRAM_ERROR", 0) + telegram_failures
+        summary["skipped_by_reason_counts"] = reason_counts
         log_copilot_run_summary(summary)
         if summary.get("telegram_sends_succeeded") == 0:
             store_copilot_last_status(summary)
@@ -731,6 +766,7 @@ def _send_recommendation_message(
             rec.telegram_message_id = str(message_id)
             db.commit()
     else:
+        _increment_copilot_run_counter(run_id, "telegram_sends_failed", 1)
         logger.warning(
             "copilot_telegram_send_failed user_id=%s alert_id=%s rec_id=%s",
             user.user_id,
@@ -1200,6 +1236,16 @@ def _release_copilot_theme(key: str, retry_ttl_seconds: int | None = None) -> No
             redis_conn.delete(key)
     except Exception:
         logger.exception("copilot_theme_dedupe_release_failed key=%s retry_ttl=%s", key, retry_ttl_seconds)
+
+
+def _extend_copilot_theme_ttl(key: str, ttl_seconds: int) -> None:
+    if not key:
+        return
+    ttl_seconds = max(int(ttl_seconds), 60)
+    try:
+        redis_conn.expire(key, ttl_seconds)
+    except Exception:
+        logger.exception("copilot_theme_dedupe_extend_failed key=%s ttl_seconds=%s", key, ttl_seconds)
 
 
 def _clear_message_actions(chat_id: str | None, message_id: Any) -> None:

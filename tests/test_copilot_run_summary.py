@@ -11,7 +11,7 @@ from app.core import defaults
 from app.core.alert_classification import AlertClassification
 from app.core.ai_copilot import COPILOT_LAST_STATUS_KEY, _theme_key_for_alert, create_ai_recommendation
 from app.alerts.theme_key import extract_theme
-from app.core.alerts import CopilotIneligibilityReason, UserDigestConfig, _enqueue_ai_recommendations
+from app.core.alerts import CopilotSkipReason, UserDigestConfig, _enqueue_ai_recommendations
 from app.db import Base
 from app.models import Alert, User
 
@@ -200,8 +200,8 @@ def test_copilot_run_summary_plan_and_user_disabled(db_session, monkeypatch):
     key = COPILOT_LAST_STATUS_KEY.format(user_id=user_id)
     payload = json.loads(fake_redis.store[key])
     reasons = payload["summary"]["skipped_by_reason_counts"]
-    assert CopilotIneligibilityReason.USER_DISABLED.value in reasons
-    assert CopilotIneligibilityReason.PLAN_DISABLED.value in reasons
+    assert CopilotSkipReason.USER_DISABLED.value in reasons
+    assert CopilotSkipReason.PLAN_DISABLED.value in reasons
 
 
 def test_copilot_run_summary_dedupe_active(db_session, monkeypatch):
@@ -236,7 +236,7 @@ def test_copilot_run_summary_dedupe_active(db_session, monkeypatch):
     key = COPILOT_LAST_STATUS_KEY.format(user_id=user_id)
     payload = json.loads(fake_redis.store[key])
     reasons = payload["summary"]["skipped_by_reason_counts"]
-    assert CopilotIneligibilityReason.COPILOT_DEDUPE_ACTIVE.value in reasons
+    assert CopilotSkipReason.DEDUPE_HIT.value in reasons
     assert fake_redis.ttl(dedupe_key) == 300
 
 
@@ -272,7 +272,7 @@ def test_copilot_run_summary_daily_cap_reached(db_session, monkeypatch):
     key = COPILOT_LAST_STATUS_KEY.format(user_id=user_id)
     payload = json.loads(fake_redis.store[key])
     reasons = payload["summary"]["skipped_by_reason_counts"]
-    assert CopilotIneligibilityReason.CAP_REACHED.value in reasons
+    assert CopilotSkipReason.CAP_REACHED.value in reasons
     assert payload["summary"]["daily_count"] == 1
     assert payload["summary"]["daily_limit"] == 1
 
@@ -294,8 +294,8 @@ def test_llm_failure_releases_dedupe(db_session, monkeypatch):
 
     monkeypatch.setattr("app.core.ai_copilot.get_trade_recommendation", _raise_llm)
 
-    with pytest.raises(RuntimeError):
-        create_ai_recommendation(db_session, user, alert)
+    rec = create_ai_recommendation(db_session, user, alert)
+    assert rec is None
 
     theme_key = _theme_key_for_alert(alert)
     dedupe_key = f"copilot:theme:{user.user_id}:{theme_key}"

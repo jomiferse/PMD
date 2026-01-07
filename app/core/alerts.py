@@ -142,6 +142,18 @@ class CopilotIneligibilityReason(str, Enum):
     MISSING_PRICE_OR_LIQUIDITY = "MISSING_PRICE_OR_LIQUIDITY"
 
 
+class CopilotSkipReason(str, Enum):
+    USER_DISABLED = "USER_DISABLED"
+    PLAN_DISABLED = "PLAN_DISABLED"
+    NO_ELIGIBLE_THEMES = "NO_ELIGIBLE_THEMES"
+    CAP_REACHED = "CAP_REACHED"
+    DEDUPE_HIT = "DEDUPE_HIT"
+    LLM_ERROR = "LLM_ERROR"
+    TELEGRAM_ERROR = "TELEGRAM_ERROR"
+    CONFIG_MISSING = "CONFIG_MISSING"
+    INTERNAL_ERROR = "INTERNAL_ERROR"
+
+
 _COPILOT_REASON_ORDER = [
     CopilotIneligibilityReason.USER_DISABLED.value,
     CopilotIneligibilityReason.PLAN_DISABLED.value,
@@ -380,7 +392,7 @@ async def _send_user_digest(
             themes_candidate=0,
             themes_eligible=0,
             themes_selected=0,
-            skipped_by_reason_counts={COPILOT_RUN_SKIP_RECENT_DIGEST: 1},
+            skipped_by_reason_counts={CopilotSkipReason.CAP_REACHED.value: 1},
             daily_count=0,
             daily_limit=max(config.max_copilot_per_day, 0),
             hourly_count=hourly_count,
@@ -415,7 +427,7 @@ async def _send_user_digest(
             themes_candidate=0,
             themes_eligible=0,
             themes_selected=0,
-            skipped_by_reason_counts={COPILOT_RUN_SKIP_NO_ALERTS: 1},
+            skipped_by_reason_counts={CopilotSkipReason.NO_ELIGIBLE_THEMES.value: 1},
             daily_count=0,
             daily_limit=max(config.max_copilot_per_day, 0),
             hourly_count=hourly_count,
@@ -478,7 +490,7 @@ async def _send_user_digest(
             themes_candidate=0,
             themes_eligible=0,
             themes_selected=0,
-            skipped_by_reason_counts={COPILOT_RUN_SKIP_MISSING_CHAT_ID: 1},
+            skipped_by_reason_counts={CopilotSkipReason.CONFIG_MISSING.value: 1},
             daily_count=0,
             daily_limit=max(config.max_copilot_per_day, 0),
             hourly_count=hourly_count,
@@ -573,7 +585,7 @@ async def _send_user_digest(
             themes_candidate=0,
             themes_eligible=0,
             themes_selected=0,
-            skipped_by_reason_counts={COPILOT_RUN_SKIP_NO_ACTIONABLE_THEMES: 1},
+            skipped_by_reason_counts={CopilotSkipReason.NO_ELIGIBLE_THEMES.value: 1},
             daily_count=0,
             daily_limit=max(config.max_copilot_per_day, 0),
             hourly_count=hourly_count,
@@ -1682,6 +1694,19 @@ def _signed_price_delta(alert: Alert) -> float:
     return alert.move or 0.0
 
 
+def _signed_delta_pct(alert: Alert) -> float:
+    if alert.old_price is not None and alert.new_price is not None:
+        base = max(alert.old_price, defaults.FLOOR_PRICE)
+        return ((alert.new_price - alert.old_price) / base) * 100
+    if alert.prev_market_p_yes is not None and alert.market_p_yes is not None:
+        base = max(alert.prev_market_p_yes, defaults.FLOOR_PRICE)
+        return ((alert.market_p_yes - alert.prev_market_p_yes) / base) * 100
+    raw_delta_pct = alert.delta_pct if alert.delta_pct is not None else alert.move
+    signed_delta = _signed_price_delta(alert)
+    sign = 1 if signed_delta >= 0 else -1
+    return sign * abs((raw_delta_pct or 0.0) * 100)
+
+
 def _format_move(alert: Alert) -> str:
     signed_delta = _signed_price_delta(alert)
     abs_move = abs(signed_delta)
@@ -1746,6 +1771,92 @@ def _format_market_link(market_id: str, slug: str | None = None) -> str:
 def _sort_copilot_reasons(reasons: list[str]) -> None:
     order = {reason: idx for idx, reason in enumerate(_COPILOT_REASON_ORDER)}
     reasons.sort(key=lambda reason: order.get(reason, len(order)))
+
+
+def _copilot_skip_reasons_for_evaluation(evaluation: CopilotThemeEvaluation) -> set[str]:
+    reasons = set(evaluation.reasons)
+    mapped: set[str] = set()
+    if CopilotSkipReason.LLM_ERROR.value in reasons:
+        mapped.add(CopilotSkipReason.LLM_ERROR.value)
+    if CopilotSkipReason.TELEGRAM_ERROR.value in reasons:
+        mapped.add(CopilotSkipReason.TELEGRAM_ERROR.value)
+    if CopilotIneligibilityReason.USER_DISABLED.value in reasons:
+        mapped.add(CopilotSkipReason.USER_DISABLED.value)
+    if CopilotIneligibilityReason.PLAN_DISABLED.value in reasons:
+        mapped.add(CopilotSkipReason.PLAN_DISABLED.value)
+    if CopilotIneligibilityReason.CAP_REACHED.value in reasons:
+        mapped.add(CopilotSkipReason.CAP_REACHED.value)
+    if CopilotIneligibilityReason.COPILOT_DEDUPE_ACTIVE.value in reasons:
+        mapped.add(CopilotSkipReason.DEDUPE_HIT.value)
+    if reasons and not mapped:
+        mapped.add(CopilotSkipReason.NO_ELIGIBLE_THEMES.value)
+    return mapped
+
+
+def _build_copilot_skip_reason_counts(
+    evaluations: list[CopilotThemeEvaluation],
+    themes_total: int,
+) -> Counter:
+    reason_counts = Counter()
+    for evaluation in evaluations:
+        for reason in _copilot_skip_reasons_for_evaluation(evaluation):
+            reason_counts[reason] += 1
+    if not evaluations and themes_total == 0:
+        reason_counts[CopilotSkipReason.NO_ELIGIBLE_THEMES.value] += 1
+    return reason_counts
+
+
+def _apply_runtime_skip_reasons(summary: dict[str, object]) -> None:
+    reasons = summary.get("skipped_by_reason_counts") or {}
+    if not isinstance(reasons, dict):
+        reasons = {}
+    llm_calls_attempted = int(summary.get("llm_calls_attempted") or 0)
+    llm_calls_succeeded = int(summary.get("llm_calls_succeeded") or 0)
+    llm_failures = max(llm_calls_attempted - llm_calls_succeeded, 0)
+    if llm_failures:
+        reasons[CopilotSkipReason.LLM_ERROR.value] = reasons.get(CopilotSkipReason.LLM_ERROR.value, 0) + llm_failures
+    telegram_sends_attempted = int(summary.get("telegram_sends_attempted") or 0)
+    telegram_sends_succeeded = int(summary.get("telegram_sends_succeeded") or 0)
+    telegram_failures = max(telegram_sends_attempted - telegram_sends_succeeded, 0)
+    if telegram_failures:
+        reasons[CopilotSkipReason.TELEGRAM_ERROR.value] = reasons.get(
+            CopilotSkipReason.TELEGRAM_ERROR.value, 0
+        ) + telegram_failures
+    summary["skipped_by_reason_counts"] = reasons
+
+
+def _derive_copilot_skip_reason(
+    config: UserDigestConfig,
+    result: CopilotEnqueueResult | None,
+) -> str | None:
+    if result is None:
+        if not config.copilot_user_enabled:
+            return CopilotSkipReason.USER_DISABLED.value
+        if not config.copilot_plan_enabled:
+            return CopilotSkipReason.PLAN_DISABLED.value
+        return CopilotSkipReason.NO_ELIGIBLE_THEMES.value
+    if result.enqueued > 0:
+        return None
+    if result.cap_reached_reason:
+        return CopilotSkipReason.CAP_REACHED.value
+    reasons = {reason for evaluation in result.evaluations for reason in evaluation.reasons}
+    if CopilotSkipReason.LLM_ERROR.value in reasons:
+        return CopilotSkipReason.LLM_ERROR.value
+    if CopilotSkipReason.TELEGRAM_ERROR.value in reasons:
+        return CopilotSkipReason.TELEGRAM_ERROR.value
+    if CopilotIneligibilityReason.USER_DISABLED.value in reasons:
+        return CopilotSkipReason.USER_DISABLED.value
+    if CopilotIneligibilityReason.PLAN_DISABLED.value in reasons:
+        return CopilotSkipReason.PLAN_DISABLED.value
+    if CopilotIneligibilityReason.CAP_REACHED.value in reasons:
+        return CopilotSkipReason.CAP_REACHED.value
+    if CopilotIneligibilityReason.COPILOT_DEDUPE_ACTIVE.value in reasons:
+        return CopilotSkipReason.DEDUPE_HIT.value
+    if result.eligible_count <= 0:
+        return CopilotSkipReason.NO_ELIGIBLE_THEMES.value
+    if result.evaluations:
+        return CopilotSkipReason.NO_ELIGIBLE_THEMES.value
+    return CopilotSkipReason.INTERNAL_ERROR.value
 
 
 def _count_snapshot_points(db: Session, alert: Alert, max_points: int = 5) -> int:
@@ -2377,10 +2488,12 @@ def _build_copilot_run_summary(
         "user_id": str(config.user_id),
         "plan": config.plan_name,
         "digest_window_minutes": digest_window_minutes or config.digest_window_minutes,
+        "window": digest_window_minutes or config.digest_window_minutes,
         "themes_total": themes_total,
         "themes_candidate": themes_candidate,
         "themes_eligible": themes_eligible,
         "themes_selected": themes_selected,
+        "selected": themes_selected,
         "daily_count": daily_count,
         "daily_limit": daily_limit,
         "hourly_count": hourly_count,
@@ -2438,9 +2551,11 @@ def _emit_copilot_run_summary(
             "llm_calls_succeeded": llm_calls_succeeded,
             "telegram_sends_attempted": telegram_sends_attempted,
             "telegram_sends_succeeded": telegram_sends_succeeded,
+            "sent": telegram_sends_succeeded,
             "duration_ms": duration_ms,
         }
     )
+    _apply_runtime_skip_reasons(summary)
     log_copilot_run_summary(summary)
     store_copilot_last_status(summary)
     return summary
@@ -2464,12 +2579,7 @@ def _record_copilot_run(
     digest_limit: int,
     enqueued: int,
 ) -> None:
-    reason_counts = Counter()
-    for evaluation in evaluations:
-        for reason in evaluation.reasons:
-            reason_counts[reason] += 1
-    if not evaluations and themes_total == 0:
-        reason_counts[COPILOT_RUN_SKIP_NO_ACTIONABLE_THEMES] += 1
+    reason_counts = _build_copilot_skip_reason_counts(evaluations, themes_total)
     summary = _build_copilot_run_summary(
         config=config,
         now_ts=now_ts,
@@ -2639,8 +2749,7 @@ def _short_title(alert: Alert, theme_hint: bool = False) -> str:
 
 
 def _format_compact_move(alert: Alert) -> str:
-    raw_delta_pct = alert.delta_pct if alert.delta_pct is not None else alert.move
-    delta_pct = (raw_delta_pct or 0.0) * 100
+    delta_pct = _signed_delta_pct(alert)
     sign = "+" if delta_pct >= 0 else "-"
     return f"{sign}{abs(delta_pct):.1f}%"
 
@@ -2766,29 +2875,10 @@ def _extract_underlying(text: str) -> str | None:
 
 
 def _copilot_skip_note(config: UserDigestConfig, result: CopilotEnqueueResult | None) -> str | None:
-    if result is None or result.enqueued > 0:
+    reason = _derive_copilot_skip_reason(config, result)
+    if not reason:
         return None
-    if result.cap_reached_reason:
-        period = "hour" if result.cap_reached_reason == "hourly" else "day"
-        if result.cap_reached_reason == "digest":
-            period = "digest"
-        return f"Copilot skipped: CAP_REACHED ({period})"
-    reasons = {reason for evaluation in result.evaluations for reason in evaluation.reasons}
-    if CopilotIneligibilityReason.CAP_REACHED.value in reasons:
-        return "Copilot skipped: CAP_REACHED"
-    if CopilotIneligibilityReason.PLAN_DISABLED.value in reasons:
-        return "Copilot skipped: PLAN_DISABLED"
-    if CopilotIneligibilityReason.USER_DISABLED.value in reasons:
-        return "Copilot skipped: USER_DISABLED"
-    dedupe_hit = any(
-        CopilotIneligibilityReason.COPILOT_DEDUPE_ACTIVE.value in evaluation.reasons
-        for evaluation in result.evaluations
-    )
-    if dedupe_hit:
-        return "Copilot skipped: DEDUPE_HIT"
-    if result.eligible_count <= 0:
-        return "Copilot skipped: NO_ELIGIBLE_THEMES"
-    return "Copilot skipped: NO_ELIGIBLE_THEMES"
+    return f"Copilot skipped: {reason}"
 
 
 def _extract_matchup(text: str) -> str | None:

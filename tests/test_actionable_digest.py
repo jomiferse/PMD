@@ -9,6 +9,8 @@ from sqlalchemy.orm import sessionmaker
 
 from app.core.alert_classification import AlertClassification
 from app.core.alerts import (
+    CopilotEnqueueResult,
+    CopilotThemeEvaluation,
     FilterReason,
     UserDigestConfig,
     _is_within_actionable_pyes,
@@ -571,6 +573,55 @@ def test_copilot_skip_reason_visible_on_caps(db_session, monkeypatch):
     assert result["sent"] is True
     assert payloads
     assert "Copilot skipped: CAP_REACHED" in payloads[0]["text"]
+
+
+def test_llm_error_footer_visible(db_session, monkeypatch):
+    alert = _make_alert(market_id="market-llm")
+    db_session.add(alert)
+    db_session.commit()
+
+    monkeypatch.setattr("app.core.alerts._digest_recently_sent", lambda *args, **kwargs: False)
+    monkeypatch.setattr("app.core.alerts._claim_digest_fingerprint", lambda *args, **kwargs: True)
+    monkeypatch.setattr("app.core.alerts._record_digest_sent", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "app.core.alerts.classify_alert_with_snapshots",
+        lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
+    )
+    monkeypatch.setattr(
+        "app.core.alerts._count_snapshot_points_bulk",
+        lambda *_args, **_kwargs: {alert.market_id: 3},
+    )
+    monkeypatch.setattr("app.core.alerts._label_mapping_unknown", lambda *_args, **_kwargs: False)
+
+    fake_result = CopilotEnqueueResult(
+        evaluations=[
+            CopilotThemeEvaluation(
+                theme_key="llm-error",
+                market_id=alert.market_id,
+                signal_speed="STANDARD",
+                reasons=["LLM_ERROR"],
+            )
+        ],
+        selected_theme_keys=[],
+        enqueued=0,
+        eligible_count=0,
+        cap_reached_reason=None,
+    )
+    monkeypatch.setattr("app.core.alerts._enqueue_ai_recommendations", lambda *args, **kwargs: fake_result)
+
+    payloads = []
+    _install_fake_telegram(monkeypatch, payloads)
+
+    config = _make_config(
+        ai_copilot_enabled=True,
+        copilot_user_enabled=True,
+        copilot_plan_enabled=True,
+    )
+    result = asyncio.run(_send_user_digest(db_session, "tenant-1", config))
+
+    assert result["sent"] is True
+    assert payloads
+    assert "Copilot skipped: LLM_ERROR" in payloads[0]["text"]
 
 
 def test_info_only_blocked_on_basic_plan(db_session, monkeypatch):

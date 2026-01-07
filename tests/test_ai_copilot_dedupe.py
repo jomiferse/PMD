@@ -234,4 +234,78 @@ def test_copilot_dedupe_shortens_on_send_failure(db_session, monkeypatch):
     theme_key = extract_theme(alert.title, category=alert.category, slug=alert.market_id).theme_key
     dedupe_key = f"copilot:theme:{user.user_id}:{theme_key}"
     assert rec is not None
-    assert fake_redis.ttl(dedupe_key) == defaults.COPILOT_DEDUPE_FAILURE_TTL_SECONDS
+    assert fake_redis.ttl(dedupe_key) == min(
+        60,
+        defaults.COPILOT_DEDUPE_FAILURE_TTL_SECONDS,
+    )
+
+
+def test_copilot_dedupe_recovers_after_llm_failure(db_session, monkeypatch):
+    user = User(user_id=uuid4(), name="Trader", telegram_chat_id=123, copilot_enabled=True)
+    alert = _make_alert(
+        title="Will the price of Bitcoin be above $50 on Jan 5 2026?",
+        market_id="market-1",
+    )
+    db_session.add_all([user, alert])
+    db_session.commit()
+
+    fake_redis = FakeRedis()
+    monkeypatch.setattr("app.core.ai_copilot.redis_conn", fake_redis)
+    monkeypatch.setattr("app.core.ai_copilot.classify_alert_with_snapshots", lambda *args, **kwargs: _StubClassification())
+
+    llm_calls = {"count": 0}
+
+    def _llm(_payload):
+        llm_calls["count"] += 1
+        if llm_calls["count"] == 1:
+            raise RuntimeError("LLM down")
+        return _llm_response()
+
+    monkeypatch.setattr("app.core.ai_copilot.get_trade_recommendation", _llm)
+    monkeypatch.setattr(
+        "app.core.ai_copilot.send_telegram_message",
+        lambda *args, **kwargs: {"ok": True, "result": {"message_id": 1}},
+    )
+
+    first = create_ai_recommendation(db_session, user, alert)
+    assert first is None
+
+    fake_redis.advance(defaults.COPILOT_DEDUPE_FAILURE_TTL_SECONDS + 1)
+    second = create_ai_recommendation(db_session, user, alert)
+    assert second is not None
+
+
+def test_copilot_dedupe_recovers_after_telegram_failure(db_session, monkeypatch):
+    user = User(user_id=uuid4(), name="Trader", telegram_chat_id=123, copilot_enabled=True)
+    alert = _make_alert(
+        title="Will the price of Bitcoin be above $50 on Jan 5 2026?",
+        market_id="market-1",
+    )
+    alert_two = _make_alert(
+        title="Will the price of Bitcoin be above $50 on Jan 5 2026?",
+        market_id="market-2",
+    )
+    db_session.add_all([user, alert, alert_two])
+    db_session.commit()
+
+    fake_redis = FakeRedis()
+    monkeypatch.setattr("app.core.ai_copilot.redis_conn", fake_redis)
+    monkeypatch.setattr("app.core.ai_copilot.classify_alert_with_snapshots", lambda *args, **kwargs: _StubClassification())
+    monkeypatch.setattr("app.core.ai_copilot.get_trade_recommendation", lambda *_args, **_kwargs: _llm_response())
+
+    send_calls = {"count": 0}
+
+    def _send(*_args, **_kwargs):
+        send_calls["count"] += 1
+        if send_calls["count"] == 1:
+            return None
+        return {"ok": True, "result": {"message_id": 1}}
+
+    monkeypatch.setattr("app.core.ai_copilot.send_telegram_message", _send)
+
+    first = create_ai_recommendation(db_session, user, alert)
+    assert first is not None
+
+    fake_redis.advance(defaults.COPILOT_DEDUPE_FAILURE_TTL_SECONDS + 1)
+    second = create_ai_recommendation(db_session, user, alert_two)
+    assert second is not None

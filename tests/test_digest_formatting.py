@@ -192,6 +192,39 @@ def test_digest_link_falls_back_to_market_id_when_slug_missing():
     assert "https://polymarket.com/market/market-456" in text
 
 
+def test_digest_compact_move_sign_negative():
+    alert = _make_alert(prev_market_p_yes=0.22, market_p_yes=0.205, old_price=0.22, new_price=0.205)
+    text = _format_digest_message(
+        alerts=[alert],
+        window_minutes=60,
+        total_actionable=1,
+        user_name="Alice",
+    )
+    assert "Move -6.8%" in text
+
+
+def test_digest_compact_move_sign_positive():
+    alert = _make_alert(prev_market_p_yes=0.205, market_p_yes=0.22, old_price=0.205, new_price=0.22)
+    text = _format_digest_message(
+        alerts=[alert],
+        window_minutes=60,
+        total_actionable=1,
+        user_name="Alice",
+    )
+    assert "Move +7.3%" in text
+
+
+def test_digest_compact_move_uses_floor_price_with_sign():
+    alert = _make_alert(prev_market_p_yes=0.02, market_p_yes=0.015, old_price=0.02, new_price=0.015)
+    text = _format_digest_message(
+        alerts=[alert],
+        window_minutes=60,
+        total_actionable=1,
+        user_name="Alice",
+    )
+    assert "Move -10.0%" in text
+
+
 def test_digest_includes_theme_evidence_line():
     now_ts = datetime.now(timezone.utc)
     alert = _make_alert(snapshot_bucket=now_ts, market_id="market-1", old_price=0.4, new_price=0.6)
