@@ -121,6 +121,30 @@ Gamma ingestion continues until Gamma returns an empty page or a short page (< `
 When `POLY_USE_GLOBAL_MINIMUMS` is true, `POLY_LIQUIDITY_MIN`/`POLY_VOLUME_MIN` default to code
 minimums if unset; server-side filters reduce payloads but local safeguards still apply.
 
+## Logging
+
+`LOG_LEVEL` controls output across the API, worker, and scheduler. All logs are JSON by default
+(`LOG_JSON=true`) and emit one JSON object per line.
+
+Levels:
+- `ERROR`: only error/exception logs (stack traces included).
+- `INFO`: high-level summaries only (`ingestion_summary`, `digest_summary`, `copilot_run_summary`).
+- `DEBUG`: verbose per-alert and request details, including httpx request logs.
+
+Examples:
+
+```bash
+LOG_LEVEL=ERROR
+```
+
+```bash
+LOG_LEVEL=INFO
+```
+
+```bash
+LOG_LEVEL=DEBUG
+```
+
 ## Admin operations
 
 Seed plans:

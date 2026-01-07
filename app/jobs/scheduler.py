@@ -7,7 +7,7 @@ import redis
 from rq import Queue
 
 from ..settings import settings
-from ..logging import configure_logging
+from ..core.logging_config import configure_logging
 from .run import job_sync_wrapper, cleanup_sync_wrapper
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,7 @@ def _maybe_enqueue_cleanup(queue: Queue, redis_conn, now_ts: datetime) -> None:
         return
     job = queue.enqueue(cleanup_sync_wrapper)
     redis_conn.set(CLEANUP_LAST_DATE_KEY, today)
-    logger.info("cleanup_enqueued id=%s", job.id)
+    logger.debug("cleanup_enqueued id=%s", job.id)
 
 
 def main() -> None:
@@ -49,9 +49,9 @@ def main() -> None:
             count = queue.count if isinstance(queue.count, int) else queue.count()
             if count == 0:
                 job = queue.enqueue(job_sync_wrapper)
-                logger.info("ingest_enqueued id=%s", job.id)
+                logger.debug("ingest_enqueued id=%s", job.id)
             else:
-                logger.info("ingest_skipped queue_count=%s", count)
+                logger.debug("ingest_skipped queue_count=%s", count)
         except Exception:
             logger.exception("ingest_enqueue_failed")
         try:

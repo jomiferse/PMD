@@ -12,7 +12,7 @@ from sqlalchemy import func
 from .db import get_db
 from .auth import admin_key_auth
 from .jobs.run import job_sync_wrapper
-from .logging import configure_logging
+from .core.logging_config import configure_logging
 from .models import (
     AiRecommendation,
     Alert,

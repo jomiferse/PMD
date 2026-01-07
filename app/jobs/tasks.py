@@ -33,7 +33,7 @@ async def run_ingest_and_alert(db: Session) -> dict:
         logger.exception("ingest_lock_failed")
         locked = True
     if not locked:
-        logger.info("ingest_skipped reason=lock_held")
+        logger.debug("ingest_skipped reason=lock_held")
         result["reason"] = "ingest_locked"
         return result
 
@@ -205,7 +205,7 @@ async def run_ingest_and_alert(db: Session) -> dict:
 
 def run_cleanup(db: Session) -> dict:
     if not settings.CLEANUP_ENABLED:
-        logger.info("cleanup_skipped disabled=true")
+        logger.debug("cleanup_skipped disabled=true")
         return {"ok": False, "disabled": True}
 
     now_ts = datetime.now(timezone.utc)
@@ -225,7 +225,7 @@ def run_cleanup(db: Session) -> dict:
         deleted_snapshots = _delete_older_than(
             db, "market_snapshots", snapshots_column, snapshots_cutoff
         )
-        logger.info(
+        logger.debug(
             "cleanup_deleted table=market_snapshots column=%s cutoff=%s count=%s",
             snapshots_column,
             snapshots_cutoff.isoformat(),
@@ -236,7 +236,7 @@ def run_cleanup(db: Session) -> dict:
 
     if alerts_column:
         deleted_alerts = _delete_older_than(db, "alerts", alerts_column, alerts_cutoff)
-        logger.info(
+        logger.debug(
             "cleanup_deleted table=alerts column=%s cutoff=%s count=%s",
             alerts_column,
             alerts_cutoff.isoformat(),
@@ -249,7 +249,7 @@ def run_cleanup(db: Session) -> dict:
         deleted_deliveries = _delete_older_than(
             db, "alert_deliveries", deliveries_column, deliveries_cutoff
         )
-        logger.info(
+        logger.debug(
             "cleanup_deleted table=alert_deliveries column=%s cutoff=%s count=%s",
             deliveries_column,
             deliveries_cutoff.isoformat(),

@@ -752,7 +752,7 @@ async def _send_user_digest(
             )
             metrics["delivered_count"] = len(sent_alert_ids)
             _log_digest_metrics(config.user_id, metrics, filter_reason_events)
-            logger.info(
+            logger.debug(
                 "digest_sent user_id=%s window_minutes=%s actionable=%s",
                 config.user_id,
                 window_minutes,
@@ -1021,7 +1021,7 @@ def _record_alert_deliveries(
         return
 
     if skip_reason:
-        logger.info("digest_delivery_skipped user_id=%s reason=%s", user_id, skip_reason)
+        logger.debug("digest_delivery_skipped user_id=%s reason=%s", user_id, skip_reason)
 
     stmt = pg_insert(AlertDelivery).values(rows)
     stmt = stmt.on_conflict_do_update(
@@ -1141,7 +1141,7 @@ async def _send_user_fast_digest(
         log_httpx_response(response, timer.elapsed(), log_error=False)
         if response.is_success:
             _record_fast_digest_sent(config.user_id, now_ts)
-            logger.info(
+            logger.debug(
                 "fast_digest_sent user_id=%s window_minutes=%s",
                 config.user_id,
                 payload.window_minutes,
@@ -2524,7 +2524,7 @@ def _enqueue_ai_recommendations(
             sent_this_digest += 1
             remaining_daily_by_speed[signal_speed] = remaining_daily_by_speed.get(signal_speed, 0) - 1
             remaining_hourly = max(remaining_hourly - 1, 0)
-            logger.info(
+            logger.debug(
                 "copilot_elite_override user_id=%s theme_key=%s signal_speed=%s",
                 config.user_id,
                 theme.key,

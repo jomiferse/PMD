@@ -390,7 +390,7 @@ def _normalize_chat_id(value: Any) -> int | None:
 
 
 def _log_event(event: str) -> None:
-    logger.info(json.dumps({"event": event}))
+    logger.debug(json.dumps({"event": event}))
 
 
 def _transaction(db: Session):
@@ -753,7 +753,7 @@ def _send_recommendation_message(
         _increment_copilot_daily_count(rec.user_id, signal_speed=signal_speed)
         _increment_copilot_hourly_count(rec.user_id)
         _increment_copilot_run_counter(run_id, "telegram_sends_succeeded", 1)
-        logger.info(
+        logger.debug(
             "copilot_decision_sent user_id=%s alert_id=%s rec_id=%s recommendation=%s confidence=%s signal_speed=%s",
             user.user_id,
             alert.id,

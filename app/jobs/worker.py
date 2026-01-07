@@ -2,7 +2,7 @@ import redis
 from rq import Worker, Queue
 
 from ..settings import settings
-from ..logging import configure_logging
+from ..core.logging_config import configure_logging
 
 redis_conn = redis.from_url(settings.REDIS_URL)
 
