@@ -133,6 +133,7 @@ class CopilotIneligibilityReason(str, Enum):
     CAP_REACHED = "CAP_REACHED"
     COPILOT_DEDUPE_ACTIVE = "COPILOT_DEDUPE_ACTIVE"
     MUTED = "MUTED"
+    PROBABILITY_MISSING = "PROBABILITY_MISSING"
     LABEL_MAPPING_UNKNOWN = "LABEL_MAPPING_UNKNOWN"
     NOT_REPRICING = "NOT_REPRICING"
     CONFIDENCE_NOT_HIGH = "CONFIDENCE_NOT_HIGH"
@@ -140,6 +141,7 @@ class CopilotIneligibilityReason(str, Enum):
     P_OUT_OF_BAND = "P_OUT_OF_BAND"
     INSUFFICIENT_SNAPSHOTS = "INSUFFICIENT_SNAPSHOTS"
     MISSING_PRICE_OR_LIQUIDITY = "MISSING_PRICE_OR_LIQUIDITY"
+    REVERSAL_FLAGGED = "REVERSAL_FLAGGED"
 
 
 class CopilotSkipReason(str, Enum):
@@ -160,6 +162,7 @@ _COPILOT_REASON_ORDER = [
     CopilotIneligibilityReason.CAP_REACHED.value,
     CopilotIneligibilityReason.COPILOT_DEDUPE_ACTIVE.value,
     CopilotIneligibilityReason.MUTED.value,
+    CopilotIneligibilityReason.PROBABILITY_MISSING.value,
     CopilotIneligibilityReason.LABEL_MAPPING_UNKNOWN.value,
     CopilotIneligibilityReason.NOT_REPRICING.value,
     CopilotIneligibilityReason.CONFIDENCE_NOT_HIGH.value,
@@ -167,6 +170,7 @@ _COPILOT_REASON_ORDER = [
     CopilotIneligibilityReason.P_OUT_OF_BAND.value,
     CopilotIneligibilityReason.INSUFFICIENT_SNAPSHOTS.value,
     CopilotIneligibilityReason.MISSING_PRICE_OR_LIQUIDITY.value,
+    CopilotIneligibilityReason.REVERSAL_FLAGGED.value,
 ]
 
 
@@ -1497,6 +1501,47 @@ def _build_theme_digest_evidence(
     return evidence_by_market
 
 
+def _build_theme_snapshot_stats(
+    db: Session,
+    themes: list[Theme],
+    window_start: datetime,
+    window_end: datetime,
+) -> dict[str, dict[str, object]]:
+    market_ids = [theme.representative.market_id for theme in themes if theme.representative.market_id]
+    if not market_ids:
+        return {}
+    rows = (
+        db.query(MarketSnapshot.market_id, MarketSnapshot.snapshot_bucket, MarketSnapshot.market_p_yes)
+        .filter(
+            MarketSnapshot.market_id.in_(market_ids),
+            MarketSnapshot.snapshot_bucket >= window_start,
+            MarketSnapshot.snapshot_bucket <= window_end,
+            MarketSnapshot.market_p_yes.isnot(None),
+        )
+        .order_by(MarketSnapshot.market_id.asc(), MarketSnapshot.snapshot_bucket.asc())
+        .all()
+    )
+    points_by_market: dict[str, list[tuple[datetime, float]]] = {}
+    for market_id, bucket, price in rows:
+        points_by_market.setdefault(market_id, []).append((bucket, price))
+
+    stats_by_market: dict[str, dict[str, object]] = {}
+    for theme in themes:
+        rep = theme.representative
+        if not rep.market_id:
+            continue
+        points = points_by_market.get(rep.market_id, [])
+        direction = _alert_direction(rep)
+        sustained = _sustained_snapshot_count(points, direction)
+        reversal = _reversal_flag(points, direction)
+        stats_by_market[rep.market_id] = {
+            "sustained": sustained,
+            "reversal": reversal,
+            "points": len(points),
+        }
+    return stats_by_market
+
+
 def _alert_direction(alert: Alert) -> int:
     if alert.new_price is not None and alert.old_price is not None:
         return 1 if alert.new_price - alert.old_price >= 0 else -1
@@ -1918,6 +1963,16 @@ def _build_copilot_skip_reason_counts(
     return reason_counts
 
 
+def _build_copilot_drop_reason_counts(
+    evaluations: list[CopilotThemeEvaluation],
+) -> Counter:
+    reason_counts = Counter()
+    for evaluation in evaluations:
+        for reason in evaluation.reasons:
+            reason_counts[reason] += 1
+    return reason_counts
+
+
 def _apply_runtime_skip_reasons(summary: dict[str, object]) -> None:
     reasons = summary.get("skipped_by_reason_counts") or {}
     if not isinstance(reasons, dict):
@@ -2033,6 +2088,8 @@ def _missing_price_or_liquidity(alert: Alert) -> bool:
 
 def _label_mapping_unknown(alert: Alert) -> bool:
     mapping_confidence = getattr(alert, "mapping_confidence", None)
+    if mapping_confidence is None:
+        return False
     return mapping_confidence != "verified"
 
 
@@ -2253,9 +2310,11 @@ def _enqueue_ai_recommendations(
         return CopilotEnqueueResult([], [], 0, 0, None)
 
     window_start = now_ts - timedelta(minutes=max(int(window_minutes), 1))
-    snapshot_counts = _count_snapshot_points_bulk(
+    mode = _copilot_window_mode(window_minutes)
+    fast_mode = mode == SIGNAL_SPEED_FAST
+    snapshot_stats = _build_theme_snapshot_stats(
         db,
-        [theme.representative for theme in themes],
+        themes,
         window_start,
         now_ts,
     )
@@ -2287,10 +2346,13 @@ def _enqueue_ai_recommendations(
         rep_classification = theme.representative_classification
         if rep_classification is None:
             rep_classification = classifier(rep) if classifier else classify_alert_with_snapshots(db, rep)
-        snapshot_count = snapshot_counts.get(rep.market_id, 0)
-        if snapshot_count <= 0:
-            snapshot_count = 1
-        setattr(rep, "sustained_snapshots", snapshot_count)
+        stats = snapshot_stats.get(rep.market_id, {})
+        sustained_snapshots = int(stats.get("sustained") or 1)
+        reversal_flag = stats.get("reversal") or "none"
+        points_count = int(stats.get("points") or 0)
+        if points_count <= 0:
+            points_count = 1
+        setattr(rep, "sustained_snapshots", sustained_snapshots)
         signal_speed = classify_signal_speed(rep, window_minutes)
         theme.signal_speed = signal_speed
         base_reasons: list[str] = []
@@ -2310,21 +2372,48 @@ def _enqueue_ai_recommendations(
 
         decision = _evaluate_delivery_decision(rep, rep_classification, config)
         if not decision.deliver and decision.reason:
-            if decision.reason == FilterReason.P_OUT_OF_BAND.value and signal_speed == SIGNAL_SPEED_FAST:
+            if decision.reason == FilterReason.P_OUT_OF_BAND.value and fast_mode:
+                pass
+            elif decision.reason == FilterReason.NON_ACTIONABLE.value:
                 pass
             elif decision.reason == FilterReason.P_OUT_OF_BAND.value:
                 base_reasons.append(CopilotIneligibilityReason.P_OUT_OF_BAND.value)
             else:
                 base_reasons.append(decision.reason)
 
-        reasons = list(base_reasons)
-        if reasons:
-            if _label_mapping_unknown(rep):
-                reasons.append(CopilotIneligibilityReason.LABEL_MAPPING_UNKNOWN.value)
-            if _missing_price_or_liquidity(rep):
-                reasons.append(CopilotIneligibilityReason.MISSING_PRICE_OR_LIQUIDITY.value)
-            if signal_speed != SIGNAL_SPEED_FAST and snapshot_count < 3:
-                reasons.append(CopilotIneligibilityReason.INSUFFICIENT_SNAPSHOTS.value)
+        prob_value = _get_probability_for_band(rep)
+        prob_parseable = prob_value is not None
+        if not prob_parseable and CopilotIneligibilityReason.PROBABILITY_MISSING.value not in base_reasons:
+            base_reasons.append(CopilotIneligibilityReason.PROBABILITY_MISSING.value)
+        if _label_mapping_unknown(rep) and CopilotIneligibilityReason.LABEL_MAPPING_UNKNOWN.value not in base_reasons:
+            base_reasons.append(CopilotIneligibilityReason.LABEL_MAPPING_UNKNOWN.value)
+        if (
+            _missing_price_or_liquidity(rep)
+            and CopilotIneligibilityReason.MISSING_PRICE_OR_LIQUIDITY.value not in base_reasons
+        ):
+            base_reasons.append(CopilotIneligibilityReason.MISSING_PRICE_OR_LIQUIDITY.value)
+        if fast_mode:
+            if sustained_snapshots < 2:
+                base_reasons.append(CopilotIneligibilityReason.INSUFFICIENT_SNAPSHOTS.value)
+            if reversal_flag != "none":
+                base_reasons.append(CopilotIneligibilityReason.REVERSAL_FLAGGED.value)
+        elif points_count < 3:
+            base_reasons.append(CopilotIneligibilityReason.INSUFFICIENT_SNAPSHOTS.value)
+
+        if fast_mode and (config.plan_name or "").strip().lower() == "elite":
+            is_strong = (rep.strength or "").upper() == "STRONG"
+            liq_ok = (rep.liquidity or 0.0) >= config.min_liquidity
+            vol_ok = (rep.volume_24h or 0.0) >= config.min_volume_24h
+            fast_ok = sustained_snapshots >= 2 and reversal_flag == "none"
+            if is_strong and liq_ok and vol_ok and prob_parseable and fast_ok:
+                override = {
+                    CopilotIneligibilityReason.NOT_REPRICING.value,
+                    CopilotIneligibilityReason.CONFIDENCE_NOT_HIGH.value,
+                    CopilotIneligibilityReason.NOT_FOLLOW.value,
+                }
+                base_reasons = [reason for reason in base_reasons if reason not in override]
+
+        reasons = list(dict.fromkeys(base_reasons))
 
         _sort_copilot_reasons(reasons)
         evaluation = CopilotThemeEvaluation(theme.key, rep.market_id, signal_speed, reasons)
@@ -2577,6 +2666,12 @@ def _enqueue_ai_recommendations(
     )
 
 
+def _copilot_window_mode(window_minutes: int) -> str:
+    if window_minutes <= 15:
+        return SIGNAL_SPEED_FAST
+    return SIGNAL_SPEED_STANDARD
+
+
 def _build_copilot_run_summary(
     config: UserDigestConfig,
     now_ts: datetime,
@@ -2592,20 +2687,25 @@ def _build_copilot_run_summary(
     hourly_count: int,
     hourly_limit: int,
     digest_limit: int,
+    eligible_drop_reasons_counts: dict[str, int] | None = None,
 ) -> dict[str, object]:
     caps_remaining_day = max(daily_limit - daily_count, 0)
     caps_remaining_hour = max(hourly_limit - hourly_count, 0)
+    window_minutes = digest_window_minutes or config.digest_window_minutes
     return {
         "run_id": run_id,
         "user_id": str(config.user_id),
         "plan": config.plan_name,
-        "digest_window_minutes": digest_window_minutes or config.digest_window_minutes,
-        "window": digest_window_minutes or config.digest_window_minutes,
+        "digest_window_minutes": window_minutes,
+        "window": window_minutes,
+        "window_minutes": window_minutes,
+        "mode": _copilot_window_mode(window_minutes),
         "themes_total": themes_total,
         "themes_candidate": themes_candidate,
         "themes_eligible": themes_eligible,
         "themes_selected": themes_selected,
         "selected": themes_selected,
+        "selected_count": themes_selected,
         "daily_count": daily_count,
         "daily_limit": daily_limit,
         "hourly_count": hourly_count,
@@ -2614,6 +2714,7 @@ def _build_copilot_run_summary(
         "caps_remaining_hour": caps_remaining_hour,
         "digest_limit": digest_limit,
         "skipped_by_reason_counts": dict(skipped_by_reason_counts),
+        "eligible_drop_reasons_counts": dict(eligible_drop_reasons_counts or {}),
         "created_at": now_ts.isoformat(),
     }
 
@@ -2637,6 +2738,7 @@ def _emit_copilot_run_summary(
     llm_calls_succeeded: int,
     telegram_sends_attempted: int,
     telegram_sends_succeeded: int,
+    eligible_drop_reasons_counts: dict[str, int] | None = None,
 ) -> dict[str, object]:
     summary = _build_copilot_run_summary(
         config=config,
@@ -2653,6 +2755,7 @@ def _emit_copilot_run_summary(
         hourly_count=hourly_count,
         hourly_limit=hourly_limit,
         digest_limit=digest_limit,
+        eligible_drop_reasons_counts=eligible_drop_reasons_counts,
     )
     duration_ms = 0
     if run_started_at:
@@ -2664,6 +2767,7 @@ def _emit_copilot_run_summary(
             "telegram_sends_attempted": telegram_sends_attempted,
             "telegram_sends_succeeded": telegram_sends_succeeded,
             "sent": telegram_sends_succeeded,
+            "sent_count": telegram_sends_succeeded,
             "duration_ms": duration_ms,
         }
     )
@@ -2692,6 +2796,7 @@ def _record_copilot_run(
     enqueued: int,
 ) -> None:
     reason_counts = _build_copilot_skip_reason_counts(evaluations, themes_total)
+    drop_reason_counts = _build_copilot_drop_reason_counts(evaluations)
     summary = _build_copilot_run_summary(
         config=config,
         now_ts=now_ts,
@@ -2707,6 +2812,7 @@ def _record_copilot_run(
         hourly_count=hourly_count,
         hourly_limit=hourly_limit,
         digest_limit=digest_limit,
+        eligible_drop_reasons_counts=dict(drop_reason_counts),
     )
     if run_id and enqueued > 0:
         init_copilot_run(run_id, summary, run_started_at=run_started_at, expected_jobs=enqueued)
@@ -2730,6 +2836,9 @@ def _record_copilot_run(
         llm_calls_succeeded=0,
         telegram_sends_attempted=0,
         telegram_sends_succeeded=0,
+        eligible_drop_reasons_counts=summary["eligible_drop_reasons_counts"]
+        if isinstance(summary.get("eligible_drop_reasons_counts"), dict)
+        else {},
     )
 
 
@@ -2990,6 +3099,20 @@ def _copilot_skip_note(config: UserDigestConfig, result: CopilotEnqueueResult | 
     reason = _derive_copilot_skip_reason(config, result)
     if not reason:
         return None
+    if reason == CopilotSkipReason.NO_ELIGIBLE_THEMES.value:
+        counts = _build_copilot_drop_reason_counts(result.evaluations) if result else Counter()
+        label_map = {
+            CopilotIneligibilityReason.INSUFFICIENT_SNAPSHOTS.value: "SNAPSHOTS_TOO_FEW",
+            CopilotIneligibilityReason.PROBABILITY_MISSING.value: "P_MISSING",
+            CopilotIneligibilityReason.P_OUT_OF_BAND.value: "OUT_OF_BAND",
+            CopilotIneligibilityReason.REVERSAL_FLAGGED.value: "REVERSAL",
+        }
+        parts = []
+        for key, value in counts.most_common():
+            label = label_map.get(key, key)
+            parts.append(f"{label}={value}")
+        detail = ", ".join(parts) if parts else "none"
+        return f"Copilot skipped: {reason} (reasons: {detail})"
     return f"Copilot skipped: {reason}"
 
 

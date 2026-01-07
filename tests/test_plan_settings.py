@@ -121,8 +121,10 @@ def test_cap_reached_uses_plan_limits(db_session, monkeypatch):
         lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
     )
     monkeypatch.setattr(
-        "app.core.alerts._count_snapshot_points_bulk",
-        lambda *_args, **_kwargs: {alert.market_id: 3},
+        "app.core.alerts._build_theme_snapshot_stats",
+        lambda *_args, **_kwargs: {
+            alert.market_id: {"sustained": 3, "reversal": "none", "points": 3}
+        },
     )
     monkeypatch.setattr("app.core.alerts._label_mapping_unknown", lambda *_args, **_kwargs: False)
 

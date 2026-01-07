@@ -99,6 +99,18 @@ def db_session():
         session.close()
 
 
+@pytest.fixture(autouse=True)
+def _patch_snapshot_stats(monkeypatch):
+    def _stats(_db, themes, _window_start, _window_end):
+        return {
+            theme.representative.market_id: {"sustained": 3, "reversal": "none", "points": 3}
+            for theme in themes
+            if theme.representative.market_id
+        }
+
+    monkeypatch.setattr("app.core.alerts._build_theme_snapshot_stats", _stats)
+
+
 def _make_alert(**overrides):
     now_ts = datetime.now(timezone.utc)
     data = dict(

@@ -32,6 +32,18 @@ def db_session():
         session.close()
 
 
+@pytest.fixture(autouse=True)
+def _patch_snapshot_stats(monkeypatch):
+    def _stats(_db, themes, _window_start, _window_end):
+        return {
+            theme.representative.market_id: {"sustained": 3, "reversal": "none", "points": 3}
+            for theme in themes
+            if theme.representative.market_id
+        }
+
+    monkeypatch.setattr("app.core.alerts._build_theme_snapshot_stats", _stats)
+
+
 class FakeRedis:
     def __init__(self):
         self.store = {}
@@ -399,8 +411,10 @@ def test_fast_copilot_skips_snapshot_requirement(db_session, monkeypatch):
         lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "WAIT"),
     )
     monkeypatch.setattr(
-        "app.core.alerts._count_snapshot_points_bulk",
-        lambda *_args, **_kwargs: {alert.market_id: 2},
+        "app.core.alerts._build_theme_snapshot_stats",
+        lambda *_args, **_kwargs: {
+            alert.market_id: {"sustained": 2, "reversal": "none", "points": 2}
+        },
     )
     monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: None)
 
@@ -412,6 +426,97 @@ def test_fast_copilot_skips_snapshot_requirement(db_session, monkeypatch):
     reasons = result.evaluations[0].reasons
     assert CopilotIneligibilityReason.NOT_FOLLOW.value in reasons
     assert CopilotIneligibilityReason.INSUFFICIENT_SNAPSHOTS.value not in reasons
+
+
+def test_fast_copilot_allows_two_snapshots(db_session, monkeypatch):
+    user_id = uuid4()
+    alert = _make_alert(market_id="market-fast", move=0.05, delta_pct=0.05)
+    db_session.add(alert)
+    db_session.commit()
+
+    fake_redis = FakeRedis()
+    monkeypatch.setattr("app.core.alerts.redis_conn", fake_redis)
+    monkeypatch.setattr(
+        "app.core.alerts._build_theme_snapshot_stats",
+        lambda *_args, **_kwargs: {
+            alert.market_id: {"sustained": 2, "reversal": "none", "points": 2}
+        },
+    )
+    monkeypatch.setattr(
+        "app.core.alerts.classify_alert_with_snapshots",
+        lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
+    )
+    enqueued: list = []
+    monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: enqueued.append(args))
+
+    config = _make_config(user_id)
+    config = config.__class__(**{**config.__dict__, "digest_window_minutes": 15})
+    result = _enqueue_ai_recommendations(db_session, config, [alert], digest_window_minutes=15)
+
+    assert result.evaluations
+    assert result.evaluations[0].reasons == []
+    assert result.eligible_count == 1
+    assert len(enqueued) == 1
+
+
+def test_fast_copilot_rejects_one_snapshot(db_session, monkeypatch):
+    user_id = uuid4()
+    alert = _make_alert(market_id="market-fast", move=0.05, delta_pct=0.05)
+    db_session.add(alert)
+    db_session.commit()
+
+    fake_redis = FakeRedis()
+    monkeypatch.setattr("app.core.alerts.redis_conn", fake_redis)
+    monkeypatch.setattr(
+        "app.core.alerts._build_theme_snapshot_stats",
+        lambda *_args, **_kwargs: {
+            alert.market_id: {"sustained": 1, "reversal": "none", "points": 1}
+        },
+    )
+    monkeypatch.setattr(
+        "app.core.alerts.classify_alert_with_snapshots",
+        lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
+    )
+    monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: None)
+
+    config = _make_config(user_id)
+    config = config.__class__(**{**config.__dict__, "digest_window_minutes": 15})
+    result = _enqueue_ai_recommendations(db_session, config, [alert], digest_window_minutes=15)
+
+    assert result.evaluations
+    reasons = result.evaluations[0].reasons
+    assert CopilotIneligibilityReason.INSUFFICIENT_SNAPSHOTS.value in reasons
+    assert result.eligible_count == 0
+
+
+def test_standard_copilot_requires_three_snapshots(db_session, monkeypatch):
+    user_id = uuid4()
+    alert = _make_alert(market_id="market-standard", move=0.05, delta_pct=0.05)
+    db_session.add(alert)
+    db_session.commit()
+
+    fake_redis = FakeRedis()
+    monkeypatch.setattr("app.core.alerts.redis_conn", fake_redis)
+    monkeypatch.setattr(
+        "app.core.alerts._build_theme_snapshot_stats",
+        lambda *_args, **_kwargs: {
+            alert.market_id: {"sustained": 2, "reversal": "none", "points": 2}
+        },
+    )
+    monkeypatch.setattr(
+        "app.core.alerts.classify_alert_with_snapshots",
+        lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
+    )
+    monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: None)
+
+    config = _make_config(user_id)
+    config = config.__class__(**{**config.__dict__, "digest_window_minutes": 60})
+    result = _enqueue_ai_recommendations(db_session, config, [alert], digest_window_minutes=60)
+
+    assert result.evaluations
+    reasons = result.evaluations[0].reasons
+    assert CopilotIneligibilityReason.INSUFFICIENT_SNAPSHOTS.value in reasons
+    assert result.eligible_count == 0
 
 
 def test_copilot_dedupe_by_theme_key(db_session, monkeypatch):
