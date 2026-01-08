@@ -10,8 +10,13 @@ from sqlalchemy.orm import sessionmaker
 from app.core import defaults
 from app.core.alert_classification import AlertClassification
 from app.core.alerts import (
+    CopilotEnqueueResult,
     CopilotIneligibilityReason,
+    CopilotSkipReason,
+    CopilotThemeEvaluation,
     UserDigestConfig,
+    _build_copilot_skip_reason_counts,
+    _copilot_skip_note,
     _get_probability_for_band,
     _enqueue_ai_recommendations,
     _send_user_digest,
@@ -399,7 +404,7 @@ def test_fast_actionable_skips_probability_band_for_copilot(db_session, monkeypa
     assert len(enqueued) == 1
 
 
-def test_fast_copilot_skips_snapshot_requirement(db_session, monkeypatch):
+def test_fast_copilot_ignores_follow_gate(db_session, monkeypatch):
     user_id = uuid4()
     alert = _make_alert(market_id="market-fast", move=0.05, delta_pct=0.05)
     db_session.add(alert)
@@ -424,9 +429,8 @@ def test_fast_copilot_skips_snapshot_requirement(db_session, monkeypatch):
     result = _enqueue_ai_recommendations(db_session, config, [alert], digest_window_minutes=15)
 
     assert result.evaluations
-    reasons = result.evaluations[0].reasons
-    assert CopilotIneligibilityReason.NOT_FOLLOW.value in reasons
-    assert CopilotIneligibilityReason.INSUFFICIENT_SNAPSHOTS.value not in reasons
+    assert result.evaluations[0].reasons == []
+    assert result.eligible_count == 1
 
 
 def test_fast_copilot_allows_two_snapshots(db_session, monkeypatch):
@@ -491,7 +495,30 @@ def test_fast_copilot_allows_three_snapshots(db_session, monkeypatch):
     assert len(enqueued) == 1
 
 
-def test_fast_copilot_rejects_one_snapshot(db_session, monkeypatch):
+def test_fast_copilot_allows_low_confidence(db_session, monkeypatch):
+    user_id = uuid4()
+    alert = _make_alert(market_id="market-fast")
+    db_session.add(alert)
+    db_session.commit()
+
+    fake_redis = FakeRedis()
+    monkeypatch.setattr("app.core.alerts.redis_conn", fake_redis)
+    monkeypatch.setattr(
+        "app.core.alerts.classify_alert_with_snapshots",
+        lambda *_args, **_kwargs: AlertClassification("REPRICING", "LOW", "WAIT"),
+    )
+    enqueued: list = []
+    monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: enqueued.append(args))
+
+    config = _make_config(user_id)
+    config = config.__class__(**{**config.__dict__, "digest_window_minutes": 15})
+    result = _enqueue_ai_recommendations(db_session, config, [alert], digest_window_minutes=15)
+
+    assert result.eligible_count == 1
+    assert len(enqueued) == 1
+
+
+def test_fast_copilot_allows_one_snapshot_with_abs_move_override(db_session, monkeypatch):
     user_id = uuid4()
     alert = _make_alert(market_id="market-fast", move=0.05, delta_pct=0.05)
     db_session.add(alert)
@@ -517,8 +544,8 @@ def test_fast_copilot_rejects_one_snapshot(db_session, monkeypatch):
 
     assert result.evaluations
     reasons = result.evaluations[0].reasons
-    assert CopilotIneligibilityReason.INSUFFICIENT_SNAPSHOTS.value in reasons
-    assert result.eligible_count == 0
+    assert CopilotIneligibilityReason.INSUFFICIENT_SNAPSHOTS.value not in reasons
+    assert result.eligible_count == 1
 
 
 def test_probability_extraction_supports_up_and_over():
@@ -542,6 +569,41 @@ def test_probability_extraction_supports_up_and_over():
     )
     setattr(alert_over, "p_over", 0.55)
     assert _get_probability_for_band(alert_over) == 0.55
+
+    alert_matchup = _make_alert(
+        market_id="market-matchup",
+        market_p_yes=None,
+        prev_market_p_yes=None,
+        is_yesno=False,
+        primary_outcome_label="Joburg Super Kings",
+    )
+    setattr(alert_matchup, "market_p_JOBURG_SUPER_KINGS", 0.72)
+    assert _get_probability_for_band(alert_matchup) == 0.72
+
+
+def test_copilot_skip_note_uses_no_eligible_themes():
+    user_id = uuid4()
+    config = _make_config(user_id)
+    evaluations = [
+        CopilotThemeEvaluation(
+            "theme-1",
+            "market-1",
+            "FAST",
+            [CopilotIneligibilityReason.PROBABILITY_MISSING.value],
+        )
+    ]
+    result = CopilotEnqueueResult(evaluations, [], 0, 0, None)
+    note = _copilot_skip_note(config, result)
+    assert "Copilot skipped: NO_ELIGIBLE_THEMES" in note
+    assert "P_MISSING=1" in note
+    assert "NO_THEMES" not in note
+
+
+def test_themes_empty_only_when_no_themes():
+    empty_counts = _build_copilot_skip_reason_counts([], 0)
+    assert CopilotSkipReason.THEMES_EMPTY.value in empty_counts
+    non_empty_counts = _build_copilot_skip_reason_counts([], 2)
+    assert CopilotSkipReason.THEMES_EMPTY.value not in non_empty_counts
 
 
 def test_standard_copilot_requires_three_snapshots(db_session, monkeypatch):

@@ -111,7 +111,7 @@ def test_ai_message_formatting_contains_sections():
         status="PROPOSED",
         created_at=datetime.now(timezone.utc),
     )
-    evidence = ["Sustained move across 3 snapshots (15m)"]
+    evidence = ["Observed across 3 snapshots (~15m) within context window"]
     text, markup = _format_ai_message(alert, rec, evidence)
     assert "AI Copilot" in text
     assert "Evidence" in text
@@ -134,7 +134,7 @@ def test_ai_message_wait_includes_change_view_and_rr_note():
         status="PROPOSED",
         created_at=datetime.now(timezone.utc),
     )
-    evidence = ["Sustained move across 1 snapshots (0m)"]
+    evidence = ["Observed across 1 snapshots (~0m) within context window"]
     text, _ = _format_ai_message(alert, rec, evidence)
     assert "Rationale (why not entering now)" in text
     assert "Risks (what could invalidate this WAIT)" in text
@@ -157,7 +157,7 @@ def test_fast_message_includes_label_and_window():
         created_at=datetime.now(timezone.utc),
     )
     evidence = [
-        "Sustained move across 2 snapshots (10m)",
+        "Observed across 2 snapshots (~10m) within context window",
         "Abs move: +0.040 | pct: +4.0% (10m)",
     ]
     text, _ = _format_ai_message(
@@ -184,7 +184,7 @@ def test_threshold_claims_removed_when_incorrect():
         status="PROPOSED",
         created_at=datetime.now(timezone.utc),
     )
-    text, _ = _format_ai_message(alert, rec, ["Sustained move across 1 snapshots (0m)"])
+    text, _ = _format_ai_message(alert, rec, ["Observed across 1 snapshots (~0m) within context window"])
     assert "0.15" not in text
     assert "15%" not in text
 
@@ -201,7 +201,7 @@ def test_threshold_claims_use_actual_probability():
         status="PROPOSED",
         created_at=datetime.now(timezone.utc),
     )
-    text, _ = _format_ai_message(alert, rec, ["Sustained move across 1 snapshots (0m)"])
+    text, _ = _format_ai_message(alert, rec, ["Observed across 1 snapshots (~0m) within context window"])
     assert "p_yes" in text
     assert "10.0%" in text
     assert "below 15%" in text

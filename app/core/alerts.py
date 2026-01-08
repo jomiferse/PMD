@@ -147,6 +147,7 @@ class CopilotIneligibilityReason(str, Enum):
 class CopilotSkipReason(str, Enum):
     USER_DISABLED = "USER_DISABLED"
     PLAN_DISABLED = "PLAN_DISABLED"
+    THEMES_EMPTY = "THEMES_EMPTY"
     NO_ELIGIBLE_THEMES = "NO_ELIGIBLE_THEMES"
     CAP_REACHED = "CAP_REACHED"
     DEDUPE_HIT = "DEDUPE_HIT"
@@ -436,7 +437,7 @@ async def _send_user_digest(
             themes_candidate=0,
             themes_eligible=0,
             themes_selected=0,
-            skipped_by_reason_counts={CopilotSkipReason.NO_ELIGIBLE_THEMES.value: 1},
+            skipped_by_reason_counts={CopilotSkipReason.THEMES_EMPTY.value: 1},
             daily_count=0,
             daily_limit=max(config.max_copilot_per_day, 0),
             hourly_count=hourly_count,
@@ -594,11 +595,14 @@ async def _send_user_digest(
             filtered_for_delivery.append(alert)
 
     copilot_result: CopilotEnqueueResult | None = None
-    if actionable_alerts:
+    copilot_candidates = actionable_alerts
+    if window_minutes <= defaults.DEFAULT_FAST_WINDOW_MINUTES and info_only_alerts:
+        copilot_candidates = deliverable_candidates
+    if copilot_candidates:
         copilot_result = _enqueue_ai_recommendations(
             db,
             config,
-            actionable_alerts,
+            copilot_candidates,
             classifier,
             allow_enqueue=config.ai_copilot_enabled,
             run_id=run_id,
@@ -615,7 +619,7 @@ async def _send_user_digest(
             themes_candidate=0,
             themes_eligible=0,
             themes_selected=0,
-            skipped_by_reason_counts={CopilotSkipReason.NO_ELIGIBLE_THEMES.value: 1},
+            skipped_by_reason_counts={CopilotSkipReason.THEMES_EMPTY.value: 1},
             daily_count=0,
             daily_limit=max(config.max_copilot_per_day, 0),
             hourly_count=hourly_count,
@@ -1971,7 +1975,7 @@ def _build_copilot_skip_reason_counts(
         for reason in _copilot_skip_reasons_for_evaluation(evaluation):
             reason_counts[reason] += 1
     if not evaluations and themes_total == 0:
-        reason_counts[CopilotSkipReason.NO_ELIGIBLE_THEMES.value] += 1
+        reason_counts[CopilotSkipReason.THEMES_EMPTY.value] += 1
     return reason_counts
 
 
@@ -2013,7 +2017,7 @@ def _derive_copilot_skip_reason(
             return CopilotSkipReason.USER_DISABLED.value
         if not config.copilot_plan_enabled:
             return CopilotSkipReason.PLAN_DISABLED.value
-        return CopilotSkipReason.NO_ELIGIBLE_THEMES.value
+        return CopilotSkipReason.THEMES_EMPTY.value
     if result.enqueued > 0:
         return None
     if result.cap_reached_reason:
@@ -2031,6 +2035,8 @@ def _derive_copilot_skip_reason(
         return CopilotSkipReason.CAP_REACHED.value
     if CopilotIneligibilityReason.COPILOT_DEDUPE_ACTIVE.value in reasons:
         return CopilotSkipReason.DEDUPE_HIT.value
+    if not result.evaluations:
+        return CopilotSkipReason.THEMES_EMPTY.value
     if result.eligible_count <= 0:
         return CopilotSkipReason.NO_ELIGIBLE_THEMES.value
     if result.evaluations:
@@ -2376,11 +2382,11 @@ def _enqueue_ai_recommendations(
                 base_reasons.append(CopilotIneligibilityReason.PLAN_DISABLED.value)
         if theme.key in muted_theme_keys or rep.market_id in muted_market_ids:
             base_reasons.append(CopilotIneligibilityReason.MUTED.value)
-        if rep_classification.signal_type != "REPRICING":
+        if rep_classification.signal_type != "REPRICING" and not fast_mode:
             base_reasons.append(CopilotIneligibilityReason.NOT_REPRICING.value)
-        if rep_classification.confidence != "HIGH":
+        if rep_classification.confidence != "HIGH" and not fast_mode:
             base_reasons.append(CopilotIneligibilityReason.CONFIDENCE_NOT_HIGH.value)
-        if rep_classification.suggested_action != "FOLLOW":
+        if rep_classification.suggested_action != "FOLLOW" and not fast_mode:
             base_reasons.append(CopilotIneligibilityReason.NOT_FOLLOW.value)
 
         decision = _evaluate_delivery_decision(rep, rep_classification, config)
@@ -2414,9 +2420,13 @@ def _enqueue_ai_recommendations(
             ):
                 base_reasons.append(CopilotIneligibilityReason.MISSING_PRICE_OR_LIQUIDITY.value)
         if fast_mode:
-            if sustained_snapshots < fast_min_snapshots:
+            fast_abs_move = _alert_abs_move(rep)
+            fast_snapshot_ok = sustained_snapshots >= fast_min_snapshots or (
+                fast_abs_move >= defaults.FAST_MIN_ABS_MOVE and reversal_flag != "full"
+            )
+            if not fast_snapshot_ok:
                 base_reasons.append(CopilotIneligibilityReason.INSUFFICIENT_SNAPSHOTS.value)
-            if reversal_flag != "none":
+            if reversal_flag == "full":
                 base_reasons.append(CopilotIneligibilityReason.REVERSAL_FLAGGED.value)
         elif points_count < 3:
             base_reasons.append(CopilotIneligibilityReason.INSUFFICIENT_SNAPSHOTS.value)
@@ -3120,6 +3130,8 @@ def _copilot_skip_note(config: UserDigestConfig, result: CopilotEnqueueResult | 
     reason = _derive_copilot_skip_reason(config, result)
     if not reason:
         return None
+    if reason == CopilotSkipReason.THEMES_EMPTY.value:
+        return f"Copilot skipped: {reason}"
     if reason == CopilotSkipReason.NO_ELIGIBLE_THEMES.value:
         counts = _build_copilot_drop_reason_counts(result.evaluations) if result else Counter()
         if not counts:
@@ -3136,7 +3148,7 @@ def _copilot_skip_note(config: UserDigestConfig, result: CopilotEnqueueResult | 
                     empty_reason_count,
                 )
                 return "Copilot skipped: INTERNAL_ERROR (reason_aggregation_empty)"
-            return f"Copilot skipped: {reason} (reasons: NO_THEMES=1)"
+            return f"Copilot skipped: {CopilotSkipReason.THEMES_EMPTY.value}"
         label_map = {
             CopilotIneligibilityReason.INSUFFICIENT_SNAPSHOTS.value: "SNAPSHOTS_TOO_FEW",
             CopilotIneligibilityReason.PROBABILITY_MISSING.value: "P_MISSING",
@@ -3150,7 +3162,7 @@ def _copilot_skip_note(config: UserDigestConfig, result: CopilotEnqueueResult | 
             label = label_map.get(key, key)
             parts.append(f"{label}={value}")
         detail = ", ".join(parts) if parts else "none"
-        return f"Copilot skipped: {reason} (reasons: {detail})"
+        return f"Copilot skipped: {reason} (drop: {detail})"
     return f"Copilot skipped: {reason}"
 
 

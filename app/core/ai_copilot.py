@@ -1038,7 +1038,9 @@ def _extreme_prob_risk_reward(alert: Alert) -> str | None:
 
 
 def _parse_sustained_from_evidence(evidence: list[str]) -> tuple[int | None, int | None]:
-    pattern = re.compile(r"Sustained move across (\d+) snapshots \((\d+)m\)")
+    pattern = re.compile(
+        r"(?:Sustained move across|Observed across) (\d+) snapshots .*?\(~?(\d+)m\)"
+    )
     for line in evidence:
         match = pattern.search(line)
         if match:
@@ -1060,7 +1062,9 @@ def _parse_abs_move_from_evidence(evidence: list[str]) -> float | None:
 
 def _parse_window_minutes_from_evidence(evidence: list[str]) -> int | None:
     abs_move_pattern = re.compile(r"Abs move: .*?\((\d+)m\)")
-    sustained_pattern = re.compile(r"Sustained move across \d+ snapshots \((\d+)m\)")
+    sustained_pattern = re.compile(
+        r"(?:Sustained move across|Observed across) \d+ snapshots .*?\(~?(\d+)m\)"
+    )
     for line in evidence:
         match = abs_move_pattern.search(line)
         if match:
@@ -1092,6 +1096,16 @@ def _apply_fast_recommendation_rules(
     signal_speed: str,
 ) -> dict[str, str]:
     if signal_speed != SIGNAL_SPEED_FAST:
+        return llm_result
+    confidence = str(llm_result.get("confidence") or "").upper()
+    if confidence and confidence != "HIGH":
+        if llm_result.get("recommendation") != "WAIT":
+            return {
+                "recommendation": "WAIT",
+                "confidence": confidence,
+                "rationale": "FAST early signal; waiting for follow-through.",
+                "risks": "Move fades quickly or reverses before confirmation.",
+            }
         return llm_result
     if llm_result.get("recommendation") != "BUY":
         return llm_result
@@ -1282,7 +1296,7 @@ def _build_evidence(db: Session, alert: Alert) -> list[str]:
         defaults.GLOBAL_MIN_VOLUME_24H,
     )
     evidence = [
-        f"Sustained move across {sustained_count} snapshots ({sustained_minutes}m)",
+        f"Observed across {sustained_count} snapshots (~{sustained_minutes}m) within context window",
         f"Abs move: {sign}{move_abs:.3f} | pct: {sign}{move_pct:.1f}% ({window_minutes}m)",
         f"Liquidity: {liq_descriptor} {_format_usd(alert.liquidity)} | Vol24h: {vol_descriptor} {_format_usd(alert.volume_24h)}",
         _reversal_line(points, direction, window_minutes, move_abs),
