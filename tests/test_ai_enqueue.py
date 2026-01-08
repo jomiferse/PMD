@@ -12,6 +12,7 @@ from app.core.alert_classification import AlertClassification
 from app.core.alerts import (
     CopilotIneligibilityReason,
     UserDigestConfig,
+    _get_probability_for_band,
     _enqueue_ai_recommendations,
     _send_user_digest,
 )
@@ -459,6 +460,37 @@ def test_fast_copilot_allows_two_snapshots(db_session, monkeypatch):
     assert len(enqueued) == 1
 
 
+def test_fast_copilot_allows_three_snapshots(db_session, monkeypatch):
+    user_id = uuid4()
+    alert = _make_alert(market_id="market-fast", move=0.05, delta_pct=0.05)
+    db_session.add(alert)
+    db_session.commit()
+
+    fake_redis = FakeRedis()
+    monkeypatch.setattr("app.core.alerts.redis_conn", fake_redis)
+    monkeypatch.setattr(
+        "app.core.alerts._build_theme_snapshot_stats",
+        lambda *_args, **_kwargs: {
+            alert.market_id: {"sustained": 3, "reversal": "none", "points": 3}
+        },
+    )
+    monkeypatch.setattr(
+        "app.core.alerts.classify_alert_with_snapshots",
+        lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
+    )
+    enqueued: list = []
+    monkeypatch.setattr("app.core.alerts.queue.enqueue", lambda *args, **kwargs: enqueued.append(args))
+
+    config = _make_config(user_id)
+    config = config.__class__(**{**config.__dict__, "digest_window_minutes": 15})
+    result = _enqueue_ai_recommendations(db_session, config, [alert], digest_window_minutes=15)
+
+    assert result.evaluations
+    assert result.evaluations[0].reasons == []
+    assert result.eligible_count == 1
+    assert len(enqueued) == 1
+
+
 def test_fast_copilot_rejects_one_snapshot(db_session, monkeypatch):
     user_id = uuid4()
     alert = _make_alert(market_id="market-fast", move=0.05, delta_pct=0.05)
@@ -487,6 +519,29 @@ def test_fast_copilot_rejects_one_snapshot(db_session, monkeypatch):
     reasons = result.evaluations[0].reasons
     assert CopilotIneligibilityReason.INSUFFICIENT_SNAPSHOTS.value in reasons
     assert result.eligible_count == 0
+
+
+def test_probability_extraction_supports_up_and_over():
+    alert_up = _make_alert(
+        market_id="market-up",
+        market_p_yes=None,
+        prev_market_p_yes=None,
+        is_yesno=False,
+        primary_outcome_label="UP",
+    )
+    setattr(alert_up, "market_p_up", 0.6)
+    assert _get_probability_for_band(alert_up) == 0.6
+
+    alert_over = _make_alert(
+        market_id="market-over",
+        market_p_yes=None,
+        prev_market_p_yes=None,
+        is_yesno=False,
+        primary_outcome_label="OVER",
+        market_kind="ou",
+    )
+    setattr(alert_over, "p_over", 0.55)
+    assert _get_probability_for_band(alert_over) == 0.55
 
 
 def test_standard_copilot_requires_three_snapshots(db_session, monkeypatch):

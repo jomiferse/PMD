@@ -1831,6 +1831,18 @@ def _get_probability_for_band(alert: Alert) -> float | None:
     treat_yesno = (is_yesno is True) or (market_kind and market_kind.lower() == "yesno")
     if treat_yesno and alert.market_p_yes is not None:
         return alert.market_p_yes
+    if not treat_yesno and is_yesno is False:
+        label = _sanitize_outcome_label(getattr(alert, "primary_outcome_label", None))
+        if label:
+            for attr in (
+                f"market_p_{label.lower()}",
+                f"market_p_{label}",
+                f"p_{label.lower()}",
+                f"p_{label}",
+            ):
+                prob = getattr(alert, attr, None)
+                if prob is not None:
+                    return prob
     if getattr(alert, "is_yesno", None) is False and not treat_yesno:
         for attr in ("market_p_primary", "p_primary"):
             prob = getattr(alert, attr, None)
@@ -2312,6 +2324,7 @@ def _enqueue_ai_recommendations(
     window_start = now_ts - timedelta(minutes=max(int(window_minutes), 1))
     mode = _copilot_window_mode(window_minutes)
     fast_mode = mode == SIGNAL_SPEED_FAST
+    fast_min_snapshots = defaults.DEFAULT_FAST_SUSTAINED_SNAPSHOTS_MIN
     snapshot_stats = _build_theme_snapshot_stats(
         db,
         themes,
@@ -2393,7 +2406,15 @@ def _enqueue_ai_recommendations(
         ):
             base_reasons.append(CopilotIneligibilityReason.MISSING_PRICE_OR_LIQUIDITY.value)
         if fast_mode:
-            if sustained_snapshots < 2:
+            liq_ok = (rep.liquidity or 0.0) >= config.min_liquidity
+            vol_ok = (rep.volume_24h or 0.0) >= config.min_volume_24h
+            if (
+                (not liq_ok or not vol_ok)
+                and CopilotIneligibilityReason.MISSING_PRICE_OR_LIQUIDITY.value not in base_reasons
+            ):
+                base_reasons.append(CopilotIneligibilityReason.MISSING_PRICE_OR_LIQUIDITY.value)
+        if fast_mode:
+            if sustained_snapshots < fast_min_snapshots:
                 base_reasons.append(CopilotIneligibilityReason.INSUFFICIENT_SNAPSHOTS.value)
             if reversal_flag != "none":
                 base_reasons.append(CopilotIneligibilityReason.REVERSAL_FLAGGED.value)
@@ -3101,11 +3122,28 @@ def _copilot_skip_note(config: UserDigestConfig, result: CopilotEnqueueResult | 
         return None
     if reason == CopilotSkipReason.NO_ELIGIBLE_THEMES.value:
         counts = _build_copilot_drop_reason_counts(result.evaluations) if result else Counter()
+        if not counts:
+            eval_count = len(result.evaluations) if result else 0
+            if result and eval_count:
+                empty_reason_count = sum(1 for evaluation in result.evaluations if not evaluation.reasons)
+                logger.error(
+                    "copilot_skip_reason_aggregation_empty user_id=%s window_minutes=%s "
+                    "eligible_count=%s evaluations=%s empty_reasons=%s",
+                    config.user_id,
+                    config.digest_window_minutes,
+                    result.eligible_count,
+                    eval_count,
+                    empty_reason_count,
+                )
+                return "Copilot skipped: INTERNAL_ERROR (reason_aggregation_empty)"
+            return f"Copilot skipped: {reason} (reasons: NO_THEMES=1)"
         label_map = {
             CopilotIneligibilityReason.INSUFFICIENT_SNAPSHOTS.value: "SNAPSHOTS_TOO_FEW",
             CopilotIneligibilityReason.PROBABILITY_MISSING.value: "P_MISSING",
             CopilotIneligibilityReason.P_OUT_OF_BAND.value: "OUT_OF_BAND",
             CopilotIneligibilityReason.REVERSAL_FLAGGED.value: "REVERSAL",
+            CopilotIneligibilityReason.CAP_REACHED.value: "CAP_REACHED",
+            CopilotIneligibilityReason.COPILOT_DEDUPE_ACTIVE.value: "DEDUPE_HIT",
         }
         parts = []
         for key, value in counts.most_common():

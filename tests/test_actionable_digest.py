@@ -634,6 +634,59 @@ def test_llm_error_footer_visible(db_session, monkeypatch):
     assert "Copilot skipped: LLM_ERROR" in payloads[0]["text"]
 
 
+def test_skip_reason_aggregation_empty_reports_internal_error(db_session, monkeypatch):
+    alert = _make_alert(market_id="market-empty-reasons")
+    db_session.add(alert)
+    db_session.commit()
+
+    monkeypatch.setattr("app.core.alerts._digest_recently_sent", lambda *args, **kwargs: False)
+    monkeypatch.setattr("app.core.alerts._claim_digest_fingerprint", lambda *args, **kwargs: True)
+    monkeypatch.setattr("app.core.alerts._record_digest_sent", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "app.core.alerts.classify_alert_with_snapshots",
+        lambda *_args, **_kwargs: AlertClassification("REPRICING", "HIGH", "FOLLOW"),
+    )
+    monkeypatch.setattr(
+        "app.core.alerts._build_theme_snapshot_stats",
+        lambda *_args, **_kwargs: {
+            alert.market_id: {"sustained": 3, "reversal": "none", "points": 3}
+        },
+    )
+    monkeypatch.setattr("app.core.alerts._label_mapping_unknown", lambda *_args, **_kwargs: False)
+
+    fake_result = CopilotEnqueueResult(
+        evaluations=[
+            CopilotThemeEvaluation(
+                theme_key="empty-reasons",
+                market_id=alert.market_id,
+                signal_speed="FAST",
+                reasons=[],
+            )
+        ],
+        selected_theme_keys=[],
+        enqueued=0,
+        eligible_count=0,
+        cap_reached_reason=None,
+    )
+    monkeypatch.setattr("app.core.alerts._enqueue_ai_recommendations", lambda *args, **kwargs: fake_result)
+
+    payloads = []
+    _install_fake_telegram(monkeypatch, payloads)
+
+    config = _make_config(
+        ai_copilot_enabled=True,
+        copilot_user_enabled=True,
+        copilot_plan_enabled=True,
+        digest_window_minutes=15,
+    )
+    result = asyncio.run(_send_user_digest(db_session, "tenant-1", config))
+
+    assert result["sent"] is True
+    assert payloads
+    assert "Copilot skipped: INTERNAL_ERROR (reason_aggregation_empty)" in payloads[0]["text"]
+    assert "reasons: none" not in payloads[0]["text"]
+
+
 def test_info_only_watchlist_on_basic_plan(db_session, monkeypatch):
     _patch_digest_helpers(monkeypatch)
 
