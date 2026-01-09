@@ -2,11 +2,29 @@ from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        extra="ignore",
+        enable_decoding=False,
+    )
 
     ENV: str = "dev"
     DATABASE_URL: str
     REDIS_URL: str
+    CORS_ALLOW_ORIGINS: list[str] = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+    APP_URL: str = "http://localhost:3000"
+    SESSION_SECRET: str = "change-me"
+    SESSION_COOKIE_NAME: str = "pmd_session"
+    SESSION_TTL_DAYS: int = 14
+
+    STRIPE_SECRET_KEY: str | None = None
+    STRIPE_WEBHOOK_SECRET: str | None = None
+    STRIPE_BASIC_PRICE_ID: str | None = None
+    STRIPE_PRO_PRICE_ID: str | None = None
+    STRIPE_ELITE_PRICE_ID: str | None = None
 
     POLYMARKET_BASE_URL: str
     POLY_PAGE_LIMIT: int = 100
@@ -51,6 +69,16 @@ class Settings(BaseSettings):
     def _empty_str_to_none(cls, value):
         if value == "":
             return None
+        return value
+
+    @field_validator("CORS_ALLOW_ORIGINS", mode="before")
+    @classmethod
+    def _split_origins(cls, value):
+        if value is None:
+            return value
+        if isinstance(value, str):
+            parts = [part.strip() for part in value.split(",") if part.strip()]
+            return parts
         return value
 
     @field_validator(

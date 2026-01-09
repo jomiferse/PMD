@@ -103,6 +103,16 @@ Optional:
 - `ALERT_RETENTION_DAYS` (default 30)
 - `DELIVERY_RETENTION_DAYS` (default 30)
 - `FAST_SIGNALS_GLOBAL_ENABLED` (default false)
+- `CORS_ALLOW_ORIGINS` (comma-separated list)
+- `APP_URL` (default `http://localhost:3000`)
+- `SESSION_SECRET` (set to a unique value)
+- `SESSION_COOKIE_NAME` (default `pmd_session`)
+- `SESSION_TTL_DAYS` (default 14)
+- `STRIPE_SECRET_KEY`
+- `STRIPE_WEBHOOK_SECRET`
+- `STRIPE_BASIC_PRICE_ID`
+- `STRIPE_PRO_PRICE_ID`
+- `STRIPE_ELITE_PRICE_ID`
 - `TELEGRAM_BOT_TOKEN`
 - `ADMIN_API_KEY`
 - `OPENAI_API_KEY`
@@ -254,6 +264,13 @@ No custody. No private keys. No execution.
 ## Endpoints
 
 - `GET /health` (no auth)
+- `POST /auth/register`
+- `POST /auth/login`
+- `POST /auth/logout`
+- `GET /me` (session or API key)
+- `POST /billing/checkout-session`
+- `POST /billing/portal-session`
+- `POST /webhooks/stripe`
 - `POST /jobs/ingest` (auth)
 - `GET /snapshots/latest` (auth)
 - `GET /alerts/latest` (auth)
