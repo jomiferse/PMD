@@ -78,6 +78,13 @@ When Copilot is blocked (caps, plan disabled, or dedupe), the digest appends a s
 Monetized limits: Copilot caps, digest cadence, theme/alert caps, FAST access.
 Plan caps can be overridden per user.
 
+## Billing runbook
+
+- Renewal date: `/me` returns `subscription.current_period_end` as an ISO string, synced from Stripe subscription `current_period_end`.
+- Canceling state: `/me` includes `subscription.cancel_at_period_end` when Stripe reports it for active subscriptions.
+- Plan changes: active subscriptions are routed to the Stripe Customer Portal (`POST /billing/portal-session`) instead of creating new checkouts.
+- Duplicate payment prevention: checkout creation rejects same-plan requests when an active subscription exists and uses Stripe idempotency keys for new sessions.
+
 ## Environment variables
 
 Required:

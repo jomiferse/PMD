@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import hashlib
 import uuid
 
 from fastapi import HTTPException
@@ -37,6 +38,17 @@ def _get_latest_subscription(db: Session, user_id: uuid.UUID) -> Subscription | 
         .order_by(Subscription.created_at.desc())
         .first()
     )
+
+
+def _is_active_status(status: str | None) -> bool:
+    return status in {"active", "trialing"}
+
+
+def _checkout_idempotency_key(user_id: uuid.UUID, plan_name: str) -> str:
+    day = datetime.now(timezone.utc).date().isoformat()
+    raw = f"{user_id}:{plan_name}:{day}".encode("utf-8")
+    digest = hashlib.sha256(raw).hexdigest()
+    return f"checkout_{digest}"
 
 
 def _get_or_create_customer_id(db: Session, user: User, auth: UserAuth | None) -> str:
@@ -148,6 +160,12 @@ def _create_checkout_session(
     if not plan:
         raise HTTPException(status_code=400, detail="plan_not_found")
 
+    subscription = _get_latest_subscription(db, user.user_id)
+    if subscription and _is_active_status(subscription.status):
+        if subscription.plan_id == plan.id:
+            raise HTTPException(status_code=409, detail="already_subscribed")
+        return _create_portal_session(db, user, auth)
+
     _require_stripe()
     customer_id = _get_or_create_customer_id(db, user, auth)
     session = stripe.checkout.Session.create(
@@ -159,6 +177,7 @@ def _create_checkout_session(
         },
         success_url=f"{settings.APP_URL}/app?checkout=success",
         cancel_url=f"{settings.APP_URL}/app/billing?checkout=cancel",
+        idempotency_key=_checkout_idempotency_key(user.user_id, plan_name),
     )
 
     subscription = _get_latest_subscription(db, user.user_id)
@@ -187,3 +206,17 @@ def _create_portal_session(
     if not portal.url:
         raise HTTPException(status_code=500, detail="portal_session_missing_url")
     return portal.url
+
+
+def _refresh_subscription_from_stripe(
+    db: Session,
+    subscription: Subscription,
+    user_id: uuid.UUID | None = None,
+) -> tuple[Subscription, dict[str, bool | None]]:
+    if not subscription.stripe_subscription_id:
+        return subscription, {"cancel_at_period_end": None}
+    _require_stripe()
+    stripe_subscription = stripe.Subscription.retrieve(subscription.stripe_subscription_id)
+    cancel_at_period_end = stripe_subscription.get("cancel_at_period_end")
+    updated = _sync_subscription_from_stripe(db, stripe_subscription, user_id)
+    return updated, {"cancel_at_period_end": bool(cancel_at_period_end) if cancel_at_period_end is not None else None}

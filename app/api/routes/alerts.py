@@ -4,7 +4,7 @@ import logging
 import time
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -12,11 +12,13 @@ from ...core.ai_copilot import COPILOT_RUN_KEY
 from ...core.alert_classification import classify_alert_with_snapshots
 from ...core.alerts import _alert_direction, _reversal_flag, _sustained_snapshot_count
 from ...core.market_links import attach_market_slugs, market_url
+from ...auth import api_key_auth
 from ...db import get_db
-from ...deps import _resolve_default_user
+from ...deps import _get_session_token, _get_session_user, _resolve_default_user
 from ...integrations.redis_client import redis_conn
 from ...models import Alert, AlertDelivery, MarketSnapshot, User
 from ...rate_limit import rate_limit
+from ...settings import settings
 
 router = APIRouter()
 logger = logging.getLogger("app.main")
@@ -24,10 +26,23 @@ logger = logging.getLogger("app.main")
 LAST_DIGEST_KEY = "alerts:last_digest:{tenant_id}"
 
 
+def _resolve_request_auth(request: Request, db: Session) -> tuple[str, uuid.UUID | None]:
+    api_key_header = (request.headers.get("x-api-key") or "").strip()
+    if api_key_header:
+        api_key = api_key_auth(x_api_key=api_key_header, db=db)
+        rate_limit(api_key)
+        return api_key.tenant_id, None
+
+    user = _get_session_user(db, _get_session_token(request))
+    if not user:
+        raise HTTPException(status_code=401, detail="not_authenticated")
+    return settings.DEFAULT_TENANT_ID, user.user_id
+
+
 @router.get("/alerts/latest")
 def alerts_latest(
+    request: Request,
     db: Session = Depends(get_db),
-    api_key=Depends(rate_limit),
     limit: int = 50,
     window_minutes: int = 24 * 60,
     strength: str | None = None,
@@ -35,10 +50,11 @@ def alerts_latest(
     copilot: str | None = None,
     user_id: str | None = None,
 ):
+    tenant_id, session_user_id = _resolve_request_auth(request, db)
     now_ts = datetime.now(timezone.utc)
     window_start = now_ts - timedelta(minutes=max(window_minutes, 1))
     query = db.query(Alert).filter(
-        Alert.tenant_id == api_key.tenant_id,
+        Alert.tenant_id == tenant_id,
         Alert.created_at >= window_start,
     )
     if strength:
@@ -48,7 +64,9 @@ def alerts_latest(
 
     resolved_user_id: uuid.UUID | None = None
     resolved_user = None
-    if user_id:
+    if session_user_id:
+        resolved_user_id = session_user_id
+    elif user_id:
         try:
             resolved_user_id = uuid.UUID(user_id)
         except ValueError:
@@ -187,13 +205,16 @@ def alerts_last_digest(api_key=Depends(rate_limit)):
 
 @router.get("/copilot/runs")
 def copilot_runs(
+    request: Request,
     db: Session = Depends(get_db),
-    api_key=Depends(rate_limit),
     limit: int = 20,
     user_id: str | None = None,
 ):
+    _, session_user_id = _resolve_request_auth(request, db)
     resolved_user_id: uuid.UUID | None = None
-    if user_id:
+    if session_user_id:
+        resolved_user_id = session_user_id
+    elif user_id:
         try:
             resolved_user_id = uuid.UUID(user_id)
         except ValueError:
