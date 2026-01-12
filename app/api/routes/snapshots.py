@@ -27,6 +27,8 @@ def latest(
             "category": r.category,
             "slug": r.slug,
             "market_p_yes": r.market_p_yes,
+            "market_p_no": r.market_p_no,
+            "market_p_no_derived": r.market_p_no_derived,
             "model_p_yes": r.model_p_yes,
             "edge": r.edge,
             "liquidity": r.liquidity,

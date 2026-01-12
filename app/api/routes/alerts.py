@@ -24,6 +24,28 @@ router = APIRouter()
 logger = logging.getLogger("app.main")
 
 LAST_DIGEST_KEY = "alerts:last_digest:{tenant_id}"
+HISTORY_RANGE_MINUTES = {
+    "1h": 60,
+    "60m": 60,
+    "6h": 6 * 60,
+    "24h": 24 * 60,
+    "7d": 7 * 24 * 60,
+}
+
+
+def _parse_history_range(value: str | None) -> int:
+    if not value:
+        return HISTORY_RANGE_MINUTES["24h"]
+    key = value.strip().lower()
+    if key in HISTORY_RANGE_MINUTES:
+        return HISTORY_RANGE_MINUTES[key]
+    if key.endswith("m") and key[:-1].isdigit():
+        return max(int(key[:-1]), 1)
+    if key.endswith("h") and key[:-1].isdigit():
+        return max(int(key[:-1]) * 60, 1)
+    if key.endswith("d") and key[:-1].isdigit():
+        return max(int(key[:-1]) * 24 * 60, 1)
+    raise HTTPException(status_code=400, detail="invalid_range")
 
 
 def _resolve_request_auth(request: Request, db: Session) -> tuple[str, uuid.UUID | None]:
@@ -199,6 +221,87 @@ def alerts_latest(
             next_cursor = f"{int(last.created_at.timestamp())}:{last.id}"
         return {"items": results, "next_cursor": next_cursor, "total": total_count}
     return results
+
+
+@router.get("/alerts/{alert_id}/history")
+def alert_history(
+    alert_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    range: str | None = "24h",
+):
+    tenant_id, _ = _resolve_request_auth(request, db)
+    alert = (
+        db.query(Alert)
+        .filter(Alert.tenant_id == tenant_id, Alert.id == alert_id)
+        .first()
+    )
+    if not alert:
+        raise HTTPException(status_code=404, detail="alert_not_found")
+
+    end_ts = alert.snapshot_bucket or alert.triggered_at or alert.created_at
+    if end_ts is None:
+        raise HTTPException(status_code=404, detail="alert_missing_timestamp")
+    if end_ts.tzinfo is None:
+        end_ts = end_ts.replace(tzinfo=timezone.utc)
+
+    range_minutes = _parse_history_range(range)
+    start_ts = end_ts - timedelta(minutes=range_minutes)
+
+    rows = (
+        db.query(
+            MarketSnapshot.snapshot_bucket,
+            MarketSnapshot.market_p_yes,
+            MarketSnapshot.market_p_no,
+            MarketSnapshot.market_p_no_derived,
+            MarketSnapshot.liquidity,
+            MarketSnapshot.volume_24h,
+        )
+        .filter(
+            MarketSnapshot.market_id == alert.market_id,
+            MarketSnapshot.snapshot_bucket >= start_ts,
+            MarketSnapshot.snapshot_bucket <= end_ts,
+            MarketSnapshot.market_p_yes.isnot(None),
+        )
+        .order_by(MarketSnapshot.snapshot_bucket.asc())
+        .all()
+    )
+
+    min_ts, max_ts = (
+        db.query(
+            func.min(MarketSnapshot.snapshot_bucket),
+            func.max(MarketSnapshot.snapshot_bucket),
+        )
+        .filter(MarketSnapshot.market_id == alert.market_id)
+        .first()
+    )
+
+    points = [
+        {
+            "ts": bucket.isoformat(),
+            "p_yes": price,
+            "p_no": p_no,
+            "p_no_derived": p_no_derived,
+            "liquidity": liquidity,
+            "volume_24h": volume_24h,
+        }
+        for bucket, price, p_no, p_no_derived, liquidity, volume_24h in rows
+    ]
+
+    return {
+        "points": points,
+        "meta": {
+            "market_id": alert.market_id,
+            "range": range or "24h",
+            "start_ts": start_ts.isoformat(),
+            "end_ts": end_ts.isoformat(),
+            "alert_ts": end_ts.isoformat(),
+            "is_yesno": alert.is_yesno,
+            "market_kind": alert.market_kind,
+            "min_ts": min_ts.isoformat() if min_ts else None,
+            "max_ts": max_ts.isoformat() if max_ts else None,
+        },
+    }
 
 
 @router.get("/copilot/recommendations")
