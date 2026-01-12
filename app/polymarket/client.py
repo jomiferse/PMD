@@ -244,6 +244,7 @@ def _parse_markets(
                 outcome_labels[0].strip() if mapping_confidence == "verified" and outcome_labels else "OUTCOME_0"
             )
             is_yesno = market_kind == "yesno"
+            p_no = outcome_prices[1] if is_yesno and len(outcome_prices) > 1 else None
 
             # Liquidity: prefer numeric fields if present
             liq = m.get("liquidityNum")
@@ -302,6 +303,7 @@ def _parse_markets(
                     category=event_title or str(event_slug),
                     slug=slug,
                     p_primary=p_primary,
+                    p_no=p_no,
                     outcome_prices=outcome_prices,
                     primary_outcome_label=primary_outcome_label,
                     mapping_confidence=mapping_confidence,

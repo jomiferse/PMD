@@ -9,6 +9,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from ..polymarket.client import PolymarketClient
+from ..polymarket.schemas import PolymarketMarket
 from ..core import defaults
 from ..core.scoring import score_market
 from ..core.dislocation import compute_dislocation_alerts
@@ -43,40 +44,10 @@ async def run_ingest_and_alert(db: Session) -> dict:
 
         snapshot_rows_map: dict[tuple[str, datetime], dict] = {}
         for m in markets:
-            s = score_market(m.market_id, m.title, m.category or "unknown", m.p_primary, m.liquidity)
-
-            market_id = _truncate_str(s.market_id, 128)
-            title = _truncate_str(s.title, 512)
-            category = _truncate_str(s.category, 128)
-            slug = normalize_slug(m.slug)
-            if slug:
-                slug = _truncate_str(slug, 256)
-
-            source_ts = m.source_ts or started_at
-            bucket = _snapshot_bucket(source_ts)
-
-            key = (market_id, bucket)
-            row = {
-                "market_id": market_id,
-                "title": title,
-                "category": category,
-                "slug": slug,
-                "market_p_yes": s.market_p_yes,
-                "primary_outcome_label": m.primary_outcome_label,
-                "is_yesno": m.is_yesno,
-                "mapping_confidence": m.mapping_confidence,
-                "market_kind": m.market_kind,
-                "liquidity": s.liquidity,
-                "volume_24h": m.volume_24h,
-                "volume_1w": m.volume_1w,
-                "best_ask": m.best_ask,
-                "last_trade_price": m.last_trade_price,
-                "model_p_yes": s.model_p_yes,
-                "edge": s.edge,
-                "source_ts": source_ts,
-                "snapshot_bucket": bucket,
-                "asof_ts": started_at,
-            }
+            key, row = _build_snapshot_row(m, started_at)
+            if not key:
+                continue
+            source_ts = row.get("source_ts", started_at)
             existing = snapshot_rows_map.get(key)
             if existing is None or source_ts >= existing.get("source_ts", started_at):
                 snapshot_rows_map[key] = row
@@ -304,6 +275,63 @@ def _backfill_missing_slugs(db: Session, snapshot_rows: list[dict]) -> None:
 def _snapshot_bucket(ts: datetime) -> datetime:
     minute = (ts.minute // 5) * 5
     return ts.replace(minute=minute, second=0, microsecond=0)
+
+
+def _resolve_market_p_no(
+    market: PolymarketMarket, market_p_yes: float | None
+) -> tuple[float | None, bool | None]:
+    if not market.is_yesno:
+        return None, None
+    if market.p_no is not None:
+        return market.p_no, False
+    if market_p_yes is None:
+        return None, None
+    return 1 - market_p_yes, True
+
+
+def _build_snapshot_row(
+    market: PolymarketMarket, started_at: datetime
+) -> tuple[tuple[str, datetime] | None, dict]:
+    s = score_market(market.market_id, market.title, market.category or "unknown", market.p_primary, market.liquidity)
+
+    market_id = _truncate_str(s.market_id, 128)
+    title = _truncate_str(s.title, 512)
+    category = _truncate_str(s.category, 128)
+    slug = normalize_slug(market.slug)
+    if slug:
+        slug = _truncate_str(slug, 256)
+
+    source_ts = market.source_ts or started_at
+    bucket = _snapshot_bucket(source_ts)
+    market_p_no, market_p_no_derived = _resolve_market_p_no(market, s.market_p_yes)
+
+    row = {
+        "market_id": market_id,
+        "title": title,
+        "category": category,
+        "slug": slug,
+        "market_p_yes": s.market_p_yes,
+        "market_p_no": market_p_no,
+        "market_p_no_derived": market_p_no_derived,
+        "primary_outcome_label": market.primary_outcome_label,
+        "is_yesno": market.is_yesno,
+        "mapping_confidence": market.mapping_confidence,
+        "market_kind": market.market_kind,
+        "liquidity": s.liquidity,
+        "volume_24h": market.volume_24h,
+        "volume_1w": market.volume_1w,
+        "best_ask": market.best_ask,
+        "last_trade_price": market.last_trade_price,
+        "model_p_yes": s.model_p_yes,
+        "edge": s.edge,
+        "source_ts": source_ts,
+        "snapshot_bucket": bucket,
+        "asof_ts": started_at,
+    }
+
+    if not market_id:
+        return None, row
+    return (market_id, bucket), row
 
 
 def _truncate_str(value: str | None, max_len: int) -> str:

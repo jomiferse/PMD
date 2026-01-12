@@ -39,6 +39,7 @@ def test_parse_yesno_outcomes_sets_is_yesno():
     assert len(markets) == 1
     parsed_market = markets[0]
     assert parsed_market.p_primary == 0.25
+    assert parsed_market.p_no == 0.75
     assert parsed_market.primary_outcome_label == "Yes"
     assert parsed_market.is_yesno is True
     assert parsed_market.mapping_confidence == "verified"

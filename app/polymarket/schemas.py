@@ -8,6 +8,7 @@ class PolymarketMarket(BaseModel):
     title: str
     category: str | None = None
     p_primary: float
+    p_no: float | None = None
     outcome_prices: list[float] = Field(default_factory=list)
     primary_outcome_label: str = "OUTCOME_0"
     mapping_confidence: str = "unknown"
