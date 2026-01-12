@@ -22,6 +22,8 @@ class MarketSnapshot(Base):
     slug: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     market_p_yes: Mapped[float] = mapped_column(Float)  # implied prob (0-1)
+    market_p_no: Mapped[float | None] = mapped_column(Float, nullable=True)
+    market_p_no_derived: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=True)
     primary_outcome_label: Mapped[str | None] = mapped_column(String(64), nullable=True)
     is_yesno: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     mapping_confidence: Mapped[str | None] = mapped_column(String(16), nullable=True)
