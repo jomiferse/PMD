@@ -5,6 +5,7 @@ PMD is a read-only analytics service that detects Polymarket mispricings and del
 ## Architecture
 
 - Polymarket Gamma ingestion -> 5-minute market snapshots
+- Snapshots include `market_p_no` for yes/no markets; `market_p_no_derived=false` when source provides p_no, else it is computed as `1 - market_p_yes`.
 - Dislocation + FAST signals -> alerts
 - Effective settings per user (code defaults -> plan -> user overrides)
 - Telegram digests + AI Copilot (manual execution only, no order sizing)
@@ -281,6 +282,7 @@ No custody. No private keys. No execution.
 - `POST /jobs/ingest` (auth)
 - `GET /snapshots/latest` (auth)
 - `GET /alerts/latest` (auth)
+- `GET /alerts/{alert_id}/history` (auth, optional `range` query)
 - `GET /alerts/summary` (auth)
 - `GET /status` (auth)
 - `GET /admin/users` (admin)
