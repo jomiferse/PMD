@@ -5,7 +5,7 @@ import time
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from ...core.ai_copilot import COPILOT_RUN_KEY
@@ -16,7 +16,7 @@ from ...auth import api_key_auth
 from ...db import get_db
 from ...deps import _get_session_token, _get_session_user, _resolve_default_user
 from ...integrations.redis_client import redis_conn
-from ...models import Alert, AlertDelivery, MarketSnapshot, User
+from ...models import AiRecommendation, Alert, AlertDelivery, MarketSnapshot, User
 from ...rate_limit import rate_limit
 from ...settings import settings
 
@@ -49,6 +49,9 @@ def alerts_latest(
     category: str | None = None,
     copilot: str | None = None,
     user_id: str | None = None,
+    cursor: str | None = None,
+    paginate: str | None = None,
+    include_total: str | None = None,
 ):
     tenant_id, session_user_id = _resolve_request_auth(request, db)
     now_ts = datetime.now(timezone.utc)
@@ -94,7 +97,25 @@ def alerts_latest(
             elif copilot_filter == "skipped":
                 query = query.filter(AlertDelivery.delivery_status.in_(["skipped", "filtered"]))
 
-    query = query.order_by(Alert.created_at.desc()).limit(limit)
+    if cursor:
+        try:
+            cursor_ts_raw, cursor_id_raw = cursor.split(":")
+            cursor_ts = datetime.fromtimestamp(int(cursor_ts_raw), tz=timezone.utc)
+            cursor_id = int(cursor_id_raw)
+            query = query.filter(
+                or_(
+                    Alert.created_at < cursor_ts,
+                    (Alert.created_at == cursor_ts) & (Alert.id < cursor_id),
+                )
+            )
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid_cursor")
+
+    total_count = None
+    if include_total:
+        total_count = query.with_entities(func.count()).scalar()
+
+    query = query.order_by(Alert.created_at.desc(), Alert.id.desc()).limit(limit)
     rows = query.all()
 
     alerts: list[Alert] = []
@@ -171,6 +192,173 @@ def alerts_latest(
                 "message": alert.message,
             }
         )
+    if paginate or cursor:
+        next_cursor = None
+        if len(alerts) == limit and alerts:
+            last = alerts[-1]
+            next_cursor = f"{int(last.created_at.timestamp())}:{last.id}"
+        return {"items": results, "next_cursor": next_cursor, "total": total_count}
+    return results
+
+
+@router.get("/copilot/recommendations")
+def copilot_recommendations(
+    request: Request,
+    db: Session = Depends(get_db),
+    limit: int = 50,
+    window_minutes: int = 24 * 60,
+    strength: str | None = None,
+    category: str | None = None,
+    copilot: str | None = None,
+    user_id: str | None = None,
+    cursor: str | None = None,
+    paginate: str | None = None,
+    include_total: str | None = None,
+):
+    tenant_id, session_user_id = _resolve_request_auth(request, db)
+    now_ts = datetime.now(timezone.utc)
+    window_start = now_ts - timedelta(minutes=max(window_minutes, 1))
+
+    resolved_user_id: uuid.UUID | None = None
+    if session_user_id:
+        resolved_user_id = session_user_id
+    elif user_id:
+        try:
+            resolved_user_id = uuid.UUID(user_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid_user_id")
+    if resolved_user_id is None:
+        resolved_user = _resolve_default_user(db)
+        if resolved_user:
+            resolved_user_id = resolved_user.user_id
+
+    if resolved_user_id is None:
+        return {"items": [], "next_cursor": None, "total": 0} if (paginate or cursor) else []
+
+    query = (
+        db.query(AiRecommendation, Alert, AlertDelivery)
+        .join(Alert, Alert.id == AiRecommendation.alert_id)
+        .outerjoin(
+            AlertDelivery,
+            (AlertDelivery.alert_id == Alert.id)
+            & (AlertDelivery.user_id == AiRecommendation.user_id),
+        )
+        .filter(
+            Alert.tenant_id == tenant_id,
+            AiRecommendation.user_id == resolved_user_id,
+            AiRecommendation.created_at >= window_start,
+        )
+    )
+    if strength:
+        query = query.filter(func.upper(Alert.strength) == strength.strip().upper())
+    if category:
+        query = query.filter(func.lower(Alert.category) == category.strip().lower())
+    if copilot:
+        copilot_filter = copilot.strip().lower()
+        if copilot_filter == "sent":
+            query = query.filter(AlertDelivery.delivery_status == "sent")
+        elif copilot_filter == "skipped":
+            query = query.filter(AlertDelivery.delivery_status.in_(["skipped", "filtered"]))
+
+    if cursor:
+        try:
+            cursor_ts_raw, cursor_id_raw = cursor.split(":")
+            cursor_ts = datetime.fromtimestamp(int(cursor_ts_raw), tz=timezone.utc)
+            cursor_id = int(cursor_id_raw)
+            query = query.filter(
+                or_(
+                    AiRecommendation.created_at < cursor_ts,
+                    (AiRecommendation.created_at == cursor_ts) & (AiRecommendation.id < cursor_id),
+                )
+            )
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid_cursor")
+
+    total_count = None
+    if include_total:
+        total_count = query.with_entities(func.count()).scalar()
+
+    query = query.order_by(AiRecommendation.created_at.desc(), AiRecommendation.id.desc()).limit(limit)
+    rows = query.all()
+
+    alerts: list[Alert] = []
+    deliveries_by_alert_id: dict[int, AlertDelivery] = {}
+    recs_by_alert_id: dict[int, AiRecommendation] = {}
+    for rec, alert, delivery in rows:
+        alerts.append(alert)
+        if delivery:
+            deliveries_by_alert_id[alert.id] = delivery
+        if rec:
+            recs_by_alert_id[alert.id] = rec
+
+    market_ids = {str(alert.market_id) for alert in alerts if alert.market_id}
+    points_by_market: dict[str, list[tuple[datetime, float]]] = {}
+    if market_ids:
+        snapshot_rows = (
+            db.query(MarketSnapshot.market_id, MarketSnapshot.snapshot_bucket, MarketSnapshot.market_p_yes)
+            .filter(
+                MarketSnapshot.market_id.in_(market_ids),
+                MarketSnapshot.snapshot_bucket >= window_start,
+                MarketSnapshot.snapshot_bucket <= now_ts,
+                MarketSnapshot.market_p_yes.isnot(None),
+            )
+            .order_by(MarketSnapshot.market_id.asc(), MarketSnapshot.snapshot_bucket.asc())
+            .all()
+        )
+        for market_id, bucket, price in snapshot_rows:
+            points_by_market.setdefault(str(market_id), []).append((bucket, price))
+
+    attach_market_slugs(db, alerts)
+
+    results = []
+    for alert in alerts:
+        classification = classify_alert_with_snapshots(db, alert)
+        points = points_by_market.get(str(alert.market_id), [])
+        direction = _alert_direction(alert)
+        sustained = _sustained_snapshot_count(points, direction)
+        reversal = _reversal_flag(points, direction)
+        delivery = deliveries_by_alert_id.get(alert.id)
+        rec = recs_by_alert_id.get(alert.id)
+        slug = getattr(alert, "market_slug", None)
+        results.append(
+            {
+                "signal_type": classification.signal_type,
+                "confidence": rec.confidence if rec else classification.confidence,
+                "suggested_action": rec.recommendation if rec else classification.suggested_action,
+                "id": alert.id,
+                "type": alert.alert_type,
+                "market_id": alert.market_id,
+                "title": alert.title,
+                "category": alert.category,
+                "move": alert.move,
+                "delta_pct": alert.delta_pct,
+                "market_p_yes": alert.market_p_yes,
+                "prev_market_p_yes": alert.prev_market_p_yes,
+                "old_price": alert.old_price,
+                "new_price": alert.new_price,
+                "liquidity": alert.liquidity,
+                "volume_24h": alert.volume_24h,
+                "strength": alert.strength,
+                "sustained": sustained,
+                "reversal": reversal,
+                "delivery_status": delivery.delivery_status if delivery else None,
+                "filter_reasons": delivery.filter_reasons if delivery else [],
+                "market_slug": slug,
+                "market_url": market_url(str(alert.market_id), slug),
+                "snapshot_bucket": alert.snapshot_bucket.isoformat(),
+                "source_ts": alert.source_ts.isoformat() if alert.source_ts else None,
+                "triggered_at": alert.triggered_at.isoformat() if alert.triggered_at else None,
+                "created_at": rec.created_at.isoformat() if rec else alert.created_at.isoformat(),
+                "message": rec.rationale if rec else alert.message,
+            }
+        )
+    if paginate or cursor:
+        next_cursor = None
+        if len(alerts) == limit and alerts:
+            last_rec = recs_by_alert_id.get(alerts[-1].id)
+            if last_rec:
+                next_cursor = f"{int(last_rec.created_at.timestamp())}:{last_rec.id}"
+        return {"items": results, "next_cursor": next_cursor, "total": total_count}
     return results
 
 

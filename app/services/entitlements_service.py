@@ -1,5 +1,7 @@
 from sqlalchemy.orm import Session
 
+from ..core.effective_settings import EffectiveSettings, resolve_effective_settings
+from ..core.plans import upgrade_target_name
 from ..models import Plan, User, UserAuth
 from .stripe_service import _get_latest_subscription, _is_active_status, _refresh_subscription_from_stripe
 
@@ -20,6 +22,55 @@ def _build_entitlements(plan: Plan | None) -> dict[str, object]:
             "max_copilot_per_digest": plan.max_copilot_per_digest,
             "max_fast_copilot_per_day": plan.max_fast_copilot_per_day,
         },
+    }
+
+
+def _build_settings_limits(effective: EffectiveSettings) -> dict[str, dict[str, object]]:
+    return {
+        "min_liquidity": {"min": effective.min_liquidity, "max": None, "allowed_values": None},
+        "min_volume_24h": {"min": effective.min_volume_24h, "max": None, "allowed_values": None},
+        "min_abs_price_move": {"min": effective.min_abs_move, "max": None, "allowed_values": None},
+        "alert_strengths": {
+            "min": None,
+            "max": None,
+            "allowed_values": sorted(effective.allowed_strengths),
+        },
+        "digest_window_minutes": {
+            "min": effective.digest_window_minutes,
+            "max": None,
+            "allowed_values": [effective.digest_window_minutes],
+        },
+        "max_alerts_per_digest": {"min": 0, "max": effective.max_alerts_per_digest, "allowed_values": None},
+        "max_themes_per_digest": {"min": 0, "max": effective.max_themes_per_digest, "allowed_values": None},
+        "max_markets_per_theme": {"min": 0, "max": effective.max_markets_per_theme, "allowed_values": None},
+        "p_min": {"min": effective.p_min, "max": effective.p_max, "allowed_values": None},
+        "p_max": {"min": effective.p_min, "max": effective.p_max, "allowed_values": None},
+        "fast_window_minutes": {"min": effective.fast_window_minutes, "max": None, "allowed_values": None},
+        "fast_max_themes_per_digest": {"min": 0, "max": effective.fast_max_themes_per_digest, "allowed_values": None},
+        "fast_max_markets_per_theme": {"min": 0, "max": effective.fast_max_markets_per_theme, "allowed_values": None},
+    }
+
+
+def _build_plan_features(plan: Plan | None, effective: EffectiveSettings) -> dict[str, object]:
+    copilot_enabled = False
+    if plan is not None:
+        copilot_enabled = bool(plan.copilot_enabled) if plan.copilot_enabled is not None else True
+    return {
+        "copilot_enabled": copilot_enabled,
+        "fast_signals_enabled": bool(effective.fast_signals_enabled),
+        "fast_mode": effective.fast_mode,
+    }
+
+
+def build_settings_entitlements(user: User) -> dict[str, object]:
+    effective = resolve_effective_settings(user, pref=None)
+    plan_name = effective.plan_name
+    plan = getattr(user, "plan", None)
+    return {
+        "plan": plan_name,
+        "upgrade_target": upgrade_target_name(plan_name),
+        "features": _build_plan_features(plan, effective),
+        "limits": _build_settings_limits(effective),
     }
 
 
