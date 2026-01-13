@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ...auth import api_key_auth, create_session_token, hash_password, verify_password
+from ...cache import build_cache_key, cached_json_response
 from ...core.plans import DEFAULT_PLAN_NAME
 from ...db import get_db
 from ...deps import (
@@ -17,6 +18,7 @@ from ...deps import (
 from ...models import Plan, User, UserAuth, UserSession
 from ...rate_limit import rate_limit
 from ...services.entitlements_service import _build_session_payload
+from ...services.sessions_service import cache_session_user_id, clear_cached_session_user_id
 from ...settings import settings
 
 router = APIRouter()
@@ -73,6 +75,8 @@ def login(payload: LoginPayload, response: Response, db: Session = Depends(get_d
     session = UserSession(token=token, user_id=user.user_id, expires_at=expires_at)
     db.add(session)
     db.commit()
+    ttl_seconds = int((expires_at - now_ts).total_seconds())
+    cache_session_user_id(token, str(user.user_id), ttl_seconds)
 
     response.set_cookie(
         settings.SESSION_COOKIE_NAME,
@@ -93,6 +97,7 @@ def logout(request: Request, response: Response, db: Session = Depends(get_db)):
     if session:
         session.revoked_at = datetime.now(timezone.utc)
         db.commit()
+    clear_cached_session_user_id(token)
     response.delete_cookie(settings.SESSION_COOKIE_NAME, path="/")
     return {"ok": True}
 
@@ -102,24 +107,56 @@ def me(request: Request, db: Session = Depends(get_db)):
     api_key_header = request.headers.get("x-api-key")
     if api_key_header:
         api_key = api_key_auth(x_api_key=api_key_header, db=db)
-        rate_limit(api_key)
-        user = _resolve_default_user(db)
-        if not user:
+        rate_limit(request, api_key)
+        cache_key = build_cache_key(
+            "me_api_key",
+            request,
+            tenant_id=api_key.tenant_id,
+            plan_id=api_key.plan,
+        )
+
+        def _build_payload():
+            user = _resolve_default_user(db)
+            if not user:
+                return {
+                    "user_id": None,
+                    "plan": api_key.plan,
+                    "telegram_chat_id": None,
+                    "telegram_pending": False,
+                }
+            plan_name = user.plan.name if user.plan else api_key.plan
             return {
-                "user_id": None,
-                "plan": api_key.plan,
-                "telegram_chat_id": None,
-                "telegram_pending": False,
+                "user_id": str(user.user_id),
+                "plan": plan_name,
+                "telegram_chat_id": user.telegram_chat_id,
+                "telegram_pending": user.telegram_chat_id is None,
             }
-        plan_name = user.plan.name if user.plan else api_key.plan
-        return {
-            "user_id": str(user.user_id),
-            "plan": plan_name,
-            "telegram_chat_id": user.telegram_chat_id,
-            "telegram_pending": user.telegram_chat_id is None,
-        }
+
+        return cached_json_response(
+            request,
+            cache_key=cache_key,
+            ttl_seconds=settings.CACHE_TTL_ME_SECONDS,
+            fetch_fn=_build_payload,
+            private=True,
+        )
 
     user = _get_session_user(db, _get_session_token(request))
     if not user:
         raise HTTPException(status_code=401, detail="not_authenticated")
-    return _build_session_payload(db, user)
+    cache_key = build_cache_key(
+        "me",
+        request,
+        user_id=str(user.user_id),
+        plan_id=user.plan_id,
+    )
+
+    def _build_payload():
+        return _build_session_payload(db, user)
+
+    return cached_json_response(
+        request,
+        cache_key=cache_key,
+        ttl_seconds=settings.CACHE_TTL_ME_SECONDS,
+        fetch_fn=_build_payload,
+        private=True,
+    )

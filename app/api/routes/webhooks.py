@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 import stripe
 
+from ...cache import invalidate_user_caches
 from ...db import get_db
 from ...models import StripeEvent, Subscription
 from ...services.stripe_service import (
@@ -53,12 +54,15 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
             user_uuid = None
         if subscription_id:
             subscription_obj = stripe.Subscription.retrieve(subscription_id)
-            _sync_subscription_from_stripe(db, subscription_obj, user_uuid)
+            subscription = _sync_subscription_from_stripe(db, subscription_obj, user_uuid)
+            if user_uuid:
+                invalidate_user_caches(str(user_uuid), plan_id=subscription.plan_id)
         elif customer_id and user_uuid:
             sub = _get_latest_subscription(db, user_uuid)
             if sub:
                 sub.stripe_customer_id = customer_id
                 db.commit()
+                invalidate_user_caches(str(user_uuid), plan_id=sub.plan_id)
     elif event_type in {"customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"}:
         metadata = data_object.get("metadata") or {}
         user_id = metadata.get("user_id")
@@ -66,13 +70,15 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
             user_uuid = uuid.UUID(user_id) if user_id else None
         except ValueError:
             user_uuid = None
-        _sync_subscription_from_stripe(db, data_object, user_uuid)
+        subscription = _sync_subscription_from_stripe(db, data_object, user_uuid)
+        invalidate_user_caches(str(subscription.user_id), plan_id=subscription.plan_id)
     elif event_type == "invoice.paid":
         subscription_id = data_object.get("subscription")
         customer_id = data_object.get("customer")
         if subscription_id:
             subscription_obj = stripe.Subscription.retrieve(subscription_id)
-            _sync_subscription_from_stripe(db, subscription_obj, None)
+            subscription = _sync_subscription_from_stripe(db, subscription_obj, None)
+            invalidate_user_caches(str(subscription.user_id), plan_id=subscription.plan_id)
         elif customer_id:
             subscription = (
                 db.query(Subscription)
@@ -82,7 +88,8 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
             )
             if subscription and subscription.stripe_subscription_id:
                 subscription_obj = stripe.Subscription.retrieve(subscription.stripe_subscription_id)
-                _sync_subscription_from_stripe(db, subscription_obj, subscription.user_id)
+                updated = _sync_subscription_from_stripe(db, subscription_obj, subscription.user_id)
+                invalidate_user_caches(str(updated.user_id), plan_id=updated.plan_id)
 
     return {"ok": True}
 

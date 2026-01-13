@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from ..polymarket.client import PolymarketClient
 from ..polymarket.schemas import PolymarketMarket
+from ..cache import invalidate_cache_prefix
 from ..core import defaults
 from ..core.scoring import score_market
 from ..core.dislocation import compute_dislocation_alerts
@@ -147,6 +148,11 @@ async def run_ingest_and_alert(db: Session) -> dict:
             db.commit()
 
         await send_user_digests(db, settings.DEFAULT_TENANT_ID)
+        invalidate_cache_prefix("alerts_latest")
+        invalidate_cache_prefix("alerts_summary")
+        invalidate_cache_prefix("alerts_last_digest")
+        invalidate_cache_prefix("snapshots_latest")
+        invalidate_cache_prefix("status")
 
         result = {
             "ok": True,

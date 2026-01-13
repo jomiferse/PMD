@@ -6,12 +6,14 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from ...cache import build_cache_key, cached_json_response, invalidate_user_caches
 from ...core.effective_settings import invalidate_effective_settings_cache, resolve_effective_settings
 from ...core.user_settings import get_effective_user_settings
 from ...db import get_db
 from ...deps import _require_session_user
 from ...models import UserAlertPreference
 from ...services.entitlements_service import _build_plan_features, _build_settings_limits
+from ...settings import settings
 
 router = APIRouter()
 
@@ -101,23 +103,39 @@ def _build_effective_payload(effective) -> dict[str, object]:
 @router.get("/settings/me")
 def settings_me(request: Request, db: Session = Depends(get_db)):
     user, _ = _require_session_user(request, db)
-    pref = (
-        db.query(UserAlertPreference)
-        .filter(UserAlertPreference.user_id == user.user_id)
-        .one_or_none()
+    cache_key = build_cache_key(
+        "settings_me",
+        request,
+        user_id=str(user.user_id),
+        plan_id=user.plan_id,
     )
-    effective = get_effective_user_settings(user, pref=pref, db=db)
-    baseline = resolve_effective_settings(user, pref=None)
-    return {
-        "user_id": str(user.user_id),
-        "user": {
-            "copilot_enabled": bool(getattr(user, "copilot_enabled", False)),
-            "developer_mode": _get_developer_mode(user),
-        },
-        "preferences": _build_preferences_payload(pref),
-        "effective": _build_effective_payload(effective),
-        "baseline": _build_effective_payload(baseline),
-    }
+
+    def _build_payload():
+        pref = (
+            db.query(UserAlertPreference)
+            .filter(UserAlertPreference.user_id == user.user_id)
+            .one_or_none()
+        )
+        effective = get_effective_user_settings(user, pref=pref, db=db)
+        baseline = resolve_effective_settings(user, pref=None)
+        return {
+            "user_id": str(user.user_id),
+            "user": {
+                "copilot_enabled": bool(getattr(user, "copilot_enabled", False)),
+                "developer_mode": _get_developer_mode(user),
+            },
+            "preferences": _build_preferences_payload(pref),
+            "effective": _build_effective_payload(effective),
+            "baseline": _build_effective_payload(baseline),
+        }
+
+    return cached_json_response(
+        request,
+        cache_key=cache_key,
+        ttl_seconds=settings.CACHE_TTL_SETTINGS_SECONDS,
+        fetch_fn=_build_payload,
+        private=True,
+    )
 
 
 @router.patch("/settings/me")
@@ -283,6 +301,7 @@ async def settings_update(
 
     db.commit()
     invalidate_effective_settings_cache(user.user_id)
+    invalidate_user_caches(str(user.user_id), plan_id=user.plan_id)
 
     refreshed_pref = (
         db.query(UserAlertPreference)

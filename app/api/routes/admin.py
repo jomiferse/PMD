@@ -13,6 +13,7 @@ from ...core.alerts import USER_DIGEST_LAST_PAYLOAD_KEY
 from ...core.effective_settings import invalidate_effective_settings_cache
 from ...core.plans import recommended_plan_name
 from ...core.user_settings import get_effective_user_settings
+from ...cache import invalidate_user_caches
 from ...db import get_db
 from ...integrations.redis_client import redis_conn
 from ...models import (
@@ -265,6 +266,7 @@ async def admin_assign_plan(
     user.plan_id = plan.id
     db.commit()
     invalidate_effective_settings_cache(user.user_id)
+    invalidate_user_caches(str(user.user_id), plan_id=plan.id)
     return {"ok": True, "user_id": str(user.user_id), "plan_id": plan.id, "plan_name": plan.name}
 
 
