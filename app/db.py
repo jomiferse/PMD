@@ -1,9 +1,17 @@
 from sqlalchemy import create_engine
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 from .settings import settings
 
-connect_args: dict[str, str] = {}
-if settings.DB_STATEMENT_TIMEOUT_SECONDS > 0:
+def _supports_statement_timeout(database_url: str) -> bool:
+    try:
+        return make_url(database_url).get_backend_name() == "postgresql"
+    except Exception:
+        return database_url.startswith("postgres")
+
+
+connect_args: dict[str, object] = {}
+if settings.DB_STATEMENT_TIMEOUT_SECONDS > 0 and _supports_statement_timeout(settings.DATABASE_URL):
     timeout_ms = int(settings.DB_STATEMENT_TIMEOUT_SECONDS * 1000)
     connect_args["options"] = f"-c statement_timeout={timeout_ms}"
 
