@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -27,8 +28,17 @@ def db_session():
         session.close()
 
 
-def _make_request(api_key: str) -> Request:
-    scope = {"type": "http", "headers": [(b"x-api-key", api_key.encode())]}
+def _make_request(api_key: str, *, path: str, query: str | None = None) -> Request:
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "scheme": "http",
+        "path": path,
+        "query_string": query.encode() if query else b"",
+        "headers": [(b"x-api-key", api_key.encode())],
+        "server": ("testserver", 80),
+        "client": ("testclient", 123),
+    }
     return Request(scope)
 
 
@@ -156,5 +166,11 @@ def test_alert_history_includes_p_no(db_session):
     db_session.add_all([api_key, alert, snapshot])
     db_session.commit()
 
-    payload = alert_history(alert.id, _make_request(api_key_raw), db_session, range="1h")
+    response = alert_history(
+        alert.id,
+        _make_request(api_key_raw, path=f"/alerts/{alert.id}/history", query="range=1h"),
+        db_session,
+        range="1h",
+    )
+    payload = json.loads(response.body)
     assert payload["points"][0]["p_no"] == pytest.approx(0.8)
