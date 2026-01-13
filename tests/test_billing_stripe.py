@@ -42,9 +42,20 @@ def client(db_session):
         yield db_session
 
     app.dependency_overrides[get_db] = _get_db
+    previous_sessionmaker = getattr(app.state, "db_sessionmaker", None)
+    app.state.db_sessionmaker = sessionmaker(
+        bind=db_session.get_bind(),
+        autoflush=False,
+        autocommit=False,
+    )
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
+    if previous_sessionmaker is None:
+        if hasattr(app.state, "db_sessionmaker"):
+            delattr(app.state, "db_sessionmaker")
+    else:
+        app.state.db_sessionmaker = previous_sessionmaker
 
 
 def _stripe_signature(payload: bytes, secret: str, timestamp: int) -> str:

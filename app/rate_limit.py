@@ -113,21 +113,22 @@ def _resolve_scope_identity(request: Request) -> tuple[str, str | None]:
         return "api_key", digest
 
     token = request.cookies.get(settings.SESSION_COOKIE_NAME)
-    user_id = _resolve_session_user_id(token)
+    user_id = _resolve_session_user_id(token, request=request)
     if user_id:
         return "user", user_id
 
     return "ip", _get_client_ip(request)
 
 
-def _resolve_session_user_id(token: str | None) -> str | None:
+def _resolve_session_user_id(token: str | None, request: Request | None = None) -> str | None:
     cached = get_cached_session_user_id(token)
     if cached:
         return cached
     if not token:
         return None
 
-    db = SessionLocal()
+    session_factory = _get_sessionmaker(request)
+    db = session_factory()
     try:
         now_ts = datetime.now(timezone.utc)
         session = (
@@ -150,6 +151,14 @@ def _resolve_session_user_id(token: str | None) -> str | None:
         return user_id
     finally:
         db.close()
+
+
+def _get_sessionmaker(request: Request | None):
+    if request is not None:
+        session_factory = getattr(request.app.state, "db_sessionmaker", None)
+        if session_factory is not None:
+            return session_factory
+    return SessionLocal
 
 
 def _apply_rate_limit(scope_key: str, limit: int, window_seconds: int) -> RateLimitResult:
