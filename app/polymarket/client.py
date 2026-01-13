@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
 from .schemas import PolymarketMarket
+from ..external import POLYMARKET_BREAKER, POLYMARKET_SEMAPHORE, async_limited
 from ..settings import settings
 from ..core import defaults
 from ..core.market_links import normalize_slug
@@ -11,6 +12,13 @@ from ..http_logging import HttpxTimer, log_httpx_response
 
 logger = logging.getLogger(__name__)
 ingestion_logger = logging.getLogger("app.ingestion.polymarket")
+
+_POLY_RETRY_ATTEMPTS = max(int(settings.POLY_MAX_RETRIES), 0) + 1
+_POLY_RETRY_WAIT = wait_exponential(
+    multiplier=max(float(settings.POLY_RETRY_BACKOFF_SECONDS), 0.1),
+    min=max(float(settings.POLY_RETRY_BACKOFF_SECONDS), 0.1),
+    max=4,
+)
 
 
 class PolymarketClient:
@@ -78,7 +86,7 @@ class PolymarketClient:
         parsed_markets = 0
         max_events_reached = False
 
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with httpx.AsyncClient(timeout=_poly_timeout()) as client:
             while True:
                 if max_events is not None and fetched_events >= max_events:
                     max_events_reached = True
@@ -142,16 +150,32 @@ class PolymarketClient:
         )
         return markets
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=0.5, min=0.5, max=4))
+    @retry(stop=stop_after_attempt(_POLY_RETRY_ATTEMPTS), wait=_POLY_RETRY_WAIT)
     async def _fetch_events_page(
         self, client: httpx.AsyncClient, url: str, params: dict[str, str]
     ) -> list[dict]:
+        if not POLYMARKET_BREAKER.allow():
+            logger.warning("polymarket_circuit_open")
+            return []
         timer = HttpxTimer()
-        r = await client.get(url, params=params)
-        log_httpx_response(r, timer.elapsed())
-        r.raise_for_status()
-        events = r.json()
+        async with async_limited(POLYMARKET_SEMAPHORE):
+            try:
+                r = await client.get(url, params=params)
+                log_httpx_response(r, timer.elapsed())
+                r.raise_for_status()
+                events = r.json()
+            except Exception:
+                POLYMARKET_BREAKER.record_failure()
+                raise
+        POLYMARKET_BREAKER.record_success()
         return events if isinstance(events, list) else []
+
+
+def _poly_timeout() -> httpx.Timeout:
+    return httpx.Timeout(
+        settings.POLY_TIMEOUT_SECONDS,
+        connect=settings.POLY_CONNECT_TIMEOUT_SECONDS,
+    )
 
 
 def _parse_float(value) -> float:

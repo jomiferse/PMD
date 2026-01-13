@@ -1,11 +1,13 @@
 import json
 import logging
+import time
 from typing import Any
 
 import httpx
 import redis
 from pydantic import BaseModel, ValidationError
 
+from ..external import LLM_BREAKER, LLM_SEMAPHORE, limited
 from ..settings import settings
 from ..http_logging import HttpxTimer, log_httpx_response
 
@@ -45,16 +47,30 @@ def get_trade_recommendation(context: dict[str, Any]) -> dict[str, str]:
         _set_cached(cache_key, fallback)
         return fallback
 
+    if not LLM_BREAKER.allow():
+        logger.warning("llm_circuit_open user_id=%s alert_id=%s", user_id, alert_id)
+        fallback = {
+            "recommendation": "WAIT",
+            "confidence": "LOW",
+            "rationale": "LLM unavailable; defaulting to WAIT.",
+            "risks": "Recommendation unavailable due to recent failures.",
+        }
+        _set_cached(cache_key, fallback)
+        return fallback
+
     headers = {"Authorization": f"Bearer {api_key}"}
     response_data = None
-    for attempt in range(max(settings.LLM_MAX_RETRIES, 0) + 1):
+    attempts = max(int(settings.LLM_MAX_RETRIES), 0) + 1
+    for attempt in range(attempts):
         try:
-            with httpx.Client(timeout=settings.LLM_TIMEOUT_SECONDS) as client:
-                timer = HttpxTimer()
-                response = client.post(settings.LLM_API_BASE, headers=headers, json=payload)
+            with limited(LLM_SEMAPHORE):
+                with httpx.Client(timeout=_llm_timeout()) as client:
+                    timer = HttpxTimer()
+                    response = client.post(settings.LLM_API_BASE, headers=headers, json=payload)
             log_httpx_response(response, timer.elapsed(), log_error=False)
             if response.is_success:
                 response_data = response.json()
+                LLM_BREAKER.record_success()
                 break
             logger.warning(
                 "llm_request_failed status=%s body=%s",
@@ -63,8 +79,12 @@ def get_trade_recommendation(context: dict[str, Any]) -> dict[str, str]:
             )
         except Exception:
             logger.exception("llm_request_exception attempt=%s", attempt + 1)
+        if attempt < attempts - 1:
+            backoff = max(float(settings.LLM_RETRY_BACKOFF_SECONDS), 0.1) * (2**attempt)
+            time.sleep(backoff)
 
     if response_data is None:
+        LLM_BREAKER.record_failure()
         fallback = {
             "recommendation": "WAIT",
             "confidence": "LOW",
@@ -77,6 +97,13 @@ def get_trade_recommendation(context: dict[str, Any]) -> dict[str, str]:
     parsed = _parse_openai_response(response_data)
     _set_cached(cache_key, parsed)
     return parsed
+
+
+def _llm_timeout() -> httpx.Timeout:
+    return httpx.Timeout(
+        settings.LLM_TIMEOUT_SECONDS,
+        connect=settings.LLM_CONNECT_TIMEOUT_SECONDS,
+    )
 
 
 def _build_openai_payload(context: dict[str, Any]) -> dict[str, Any]:
