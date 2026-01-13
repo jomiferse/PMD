@@ -141,7 +141,10 @@ def _resolve_session_user_id(token: str | None) -> str | None:
         )
         if not session:
             return None
-        ttl_seconds = int((session.expires_at - now_ts).total_seconds())
+        expires_at = session.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        ttl_seconds = int((expires_at - now_ts).total_seconds())
         user_id = str(session.user_id)
         cache_session_user_id(token, user_id, ttl_seconds)
         return user_id
