@@ -12,6 +12,7 @@ class MarketSnapshot(Base):
         UniqueConstraint("market_id", "snapshot_bucket", name="uq_market_bucket"),
         Index("ix_market_snapshots_bucket", "snapshot_bucket"),
         Index("ix_market_snapshots_market_asof", "market_id", "asof_ts"),
+        Index("ix_market_snapshots_market_bucket", "market_id", "snapshot_bucket"),
         Index("ix_market_snapshots_asof_desc", text("asof_ts DESC")),
     )
 
@@ -67,6 +68,8 @@ class Alert(Base):
         Index("ix_alerts_created_at", "created_at"),
         Index("ix_alerts_tenant_type", "tenant_id", "alert_type"),
         Index("ix_alerts_tenant_created", "tenant_id", "created_at"),
+        Index("ix_alerts_tenant_strength", "tenant_id", "strength"),
+        Index("ix_alerts_tenant_category", "tenant_id", "category"),
         Index("ix_alerts_cooldown", "tenant_id", "alert_type", "market_id", "triggered_at"),
         Index("ix_alerts_market_triggered", "market_id", "triggered_at"),
     )
@@ -285,6 +288,7 @@ class AiRecommendation(Base):
     __tablename__ = "ai_recommendations"
     __table_args__ = (
         Index("ix_ai_recommendations_user_status", "user_id", "status"),
+        Index("ix_ai_recommendations_user_created", "user_id", "created_at"),
         Index("ix_ai_recommendations_created_at", "created_at"),
     )
 

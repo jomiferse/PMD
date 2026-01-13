@@ -13,6 +13,7 @@ from .run import job_sync_wrapper, cleanup_sync_wrapper
 logger = logging.getLogger(__name__)
 CLEANUP_LAST_DATE_KEY = "cleanup:last_date"
 SCHEDULER_HEARTBEAT_KEY = "scheduler:heartbeat"
+INGEST_ENQUEUE_LOCK_KEY = "ingest:enqueue_lock"
 
 
 def _maybe_enqueue_cleanup(queue: Queue, redis_conn, now_ts: datetime) -> None:
@@ -48,8 +49,17 @@ def main() -> None:
                 redis_conn.set(SCHEDULER_HEARTBEAT_KEY, scheduler_id, ex=ttl_seconds)
             count = queue.count if isinstance(queue.count, int) else queue.count()
             if count == 0:
-                job = queue.enqueue(job_sync_wrapper)
-                logger.debug("ingest_enqueued id=%s", job.id)
+                enqueue_lock = redis_conn.set(
+                    INGEST_ENQUEUE_LOCK_KEY,
+                    scheduler_id,
+                    nx=True,
+                    ex=max(interval, 30),
+                )
+                if not enqueue_lock:
+                    logger.debug("ingest_enqueue_skipped reason=lock_held")
+                else:
+                    job = queue.enqueue(job_sync_wrapper)
+                    logger.debug("ingest_enqueued id=%s", job.id)
             else:
                 logger.debug("ingest_skipped queue_count=%s", count)
         except Exception:
