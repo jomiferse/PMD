@@ -50,6 +50,22 @@ docker compose -f docker-compose.dev.yml exec api python -m app.scripts.create_a
 curl -H "X-API-Key: <key>" http://localhost:8000/alerts/latest
 ```
 
+Example alert fields (truncated):
+
+```json
+[
+  {
+    "id": 123,
+    "market_id": "market-1",
+    "market_p_yes": 0.716,
+    "prev_market_p_yes": 0.055,
+    "probability_label": "p_EASTERN_MICHIGAN_EAGLES",
+    "probability_curr": 0.716,
+    "probability_prev": 0.055
+  }
+]
+```
+
 ## Database reset / Alembic
 
 The database is disposable. If you need a clean reset, drop the database and run:

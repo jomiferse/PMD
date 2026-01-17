@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from ...core.ai_copilot import COPILOT_RUN_KEY
 from ...core.alert_classification import classify_alert_with_snapshots
-from ...core.alerts import _alert_direction, _reversal_flag, _sustained_snapshot_count
+from ...core.alerts import _alert_direction, _format_probability_label, _reversal_flag, _sustained_snapshot_count
 from ...core.market_links import attach_market_slugs, market_url
 from ...auth import api_key_auth
 from ...cache import build_cache_key, cached_json_response
@@ -204,10 +204,17 @@ def alerts_latest(
                     "category": alert.category,
                     "move": alert.move,
                     "delta_pct": alert.delta_pct,
-                    "market_p_yes": alert.market_p_yes,
-                    "prev_market_p_yes": alert.prev_market_p_yes,
-                    "old_price": alert.old_price,
-                    "new_price": alert.new_price,
+                      "market_p_yes": alert.market_p_yes,
+                      "prev_market_p_yes": alert.prev_market_p_yes,
+                      "probability_label": _format_probability_label(alert),
+                      "probability_curr": alert.market_p_yes,
+                      "probability_prev": alert.prev_market_p_yes,
+                      "primary_outcome_label": alert.primary_outcome_label,
+                      "mapping_confidence": alert.mapping_confidence,
+                      "is_yesno": alert.is_yesno,
+                      "market_kind": alert.market_kind,
+                      "old_price": alert.old_price,
+                      "new_price": alert.new_price,
                     "liquidity": alert.liquidity,
                     "volume_24h": alert.volume_24h,
                     "strength": alert.strength,
@@ -477,9 +484,16 @@ def copilot_recommendations(
                     "category": alert.category,
                     "move": alert.move,
                     "delta_pct": alert.delta_pct,
-                    "market_p_yes": alert.market_p_yes,
-                    "prev_market_p_yes": alert.prev_market_p_yes,
-                    "old_price": alert.old_price,
+                      "market_p_yes": alert.market_p_yes,
+                      "prev_market_p_yes": alert.prev_market_p_yes,
+                      "probability_label": _format_probability_label(alert),
+                      "probability_curr": alert.market_p_yes,
+                      "probability_prev": alert.prev_market_p_yes,
+                      "primary_outcome_label": alert.primary_outcome_label,
+                      "mapping_confidence": alert.mapping_confidence,
+                      "is_yesno": alert.is_yesno,
+                      "market_kind": alert.market_kind,
+                      "old_price": alert.old_price,
                     "new_price": alert.new_price,
                     "liquidity": alert.liquidity,
                     "volume_24h": alert.volume_24h,
