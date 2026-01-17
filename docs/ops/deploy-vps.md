@@ -49,7 +49,17 @@ Create A records:
 
 ## Configure environment
 
-From the repo root (`pmd/`):
+Ensure the frontend repo sits beside the backend repo:
+
+```bash
+mkdir -p /srv/pmd-stack
+cd /srv/pmd-stack
+git clone <backend-repo-url> pmd
+git clone <frontend-repo-url> pmd_frontend
+cd pmd
+```
+
+From the backend repo root (`pmd/`):
 
 ```bash
 cp .env.prod.example .env.prod
