@@ -9,6 +9,7 @@ ENV/
 env/
 
 .env
+.env.prod
 
 *.log
 
@@ -27,5 +28,6 @@ htmlcov/
 .DS_Store
 
 pgdata/
+backups/
 
 doc
