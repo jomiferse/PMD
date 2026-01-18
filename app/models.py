@@ -43,24 +43,6 @@ class MarketSnapshot(Base):
     asof_ts: Mapped[DateTime] = mapped_column(DateTime, default=func.now(), index=True)
 
 
-class ApiKey(Base):
-    __tablename__ = "api_keys"
-    __table_args__ = (
-        UniqueConstraint("key_hash", name="uq_api_key_hash"),
-        Index("ix_api_keys_tenant_id", "tenant_id"),
-    )
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    name: Mapped[str] = mapped_column(String(128), nullable=False)
-    key_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    plan: Mapped[str] = mapped_column(String(64), default="basic")
-    rate_limit_per_min: Mapped[int] = mapped_column(Integer, default=60)
-    created_at: Mapped[DateTime] = mapped_column(DateTime, default=func.now())
-    last_used_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
-    revoked_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
-
-
 class Alert(Base):
     __tablename__ = "alerts"
     __table_args__ = (
