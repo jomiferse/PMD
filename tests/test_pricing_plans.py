@@ -8,7 +8,6 @@ from sqlalchemy.orm import sessionmaker
 from app.core.alert_classification import AlertClassification, AlertClass
 from app.core.ai_copilot import create_ai_recommendation
 from app.core.alerts import _enqueue_ai_recommendations, _resolve_user_preferences
-from app.core.plans import get_plan_seeds
 from app.core.user_settings import get_effective_user_settings
 from app.db import Base
 from app.models import Alert, Plan, User
@@ -59,9 +58,87 @@ class FakeRedis:
         return True
 
 
+PLAN_SEEDS = {
+    "basic": {
+        "name": "basic",
+        "price_monthly": 10.0,
+        "copilot_enabled": False,
+        "max_copilot_per_day": 0,
+        "max_fast_copilot_per_day": 0,
+        "max_copilot_per_hour": 0,
+        "max_copilot_per_digest": 0,
+        "copilot_theme_ttl_minutes": 360,
+        "digest_window_minutes": 60,
+        "max_themes_per_digest": 3,
+        "max_alerts_per_digest": 3,
+        "max_markets_per_theme": 3,
+        "min_liquidity": 5000.0,
+        "min_volume_24h": 5000.0,
+        "min_abs_move": 0.01,
+        "p_min": 0.15,
+        "p_max": 0.85,
+        "allowed_strengths": "STRONG",
+        "fast_signals_enabled": False,
+        "fast_mode": "WATCH_ONLY",
+        "fast_window_minutes": 15,
+        "fast_max_themes_per_digest": 2,
+        "fast_max_markets_per_theme": 2,
+    },
+    "pro": {
+        "name": "pro",
+        "price_monthly": 29.0,
+        "copilot_enabled": True,
+        "max_copilot_per_day": 30,
+        "max_fast_copilot_per_day": 30,
+        "max_copilot_per_hour": 3,
+        "max_copilot_per_digest": 1,
+        "copilot_theme_ttl_minutes": 360,
+        "digest_window_minutes": 30,
+        "max_themes_per_digest": 5,
+        "max_alerts_per_digest": 7,
+        "max_markets_per_theme": 3,
+        "min_liquidity": 3000.0,
+        "min_volume_24h": 3000.0,
+        "min_abs_move": 0.01,
+        "p_min": 0.15,
+        "p_max": 0.85,
+        "allowed_strengths": "STRONG,MEDIUM",
+        "fast_signals_enabled": True,
+        "fast_mode": "WATCH_ONLY",
+        "fast_window_minutes": 10,
+        "fast_max_themes_per_digest": 2,
+        "fast_max_markets_per_theme": 2,
+    },
+    "elite": {
+        "name": "elite",
+        "price_monthly": 99.0,
+        "copilot_enabled": True,
+        "max_copilot_per_day": 200,
+        "max_fast_copilot_per_day": 200,
+        "max_copilot_per_hour": 12,
+        "max_copilot_per_digest": 1,
+        "copilot_theme_ttl_minutes": 120,
+        "digest_window_minutes": 15,
+        "max_themes_per_digest": 10,
+        "max_alerts_per_digest": 10,
+        "max_markets_per_theme": 3,
+        "min_liquidity": 1000.0,
+        "min_volume_24h": 1000.0,
+        "min_abs_move": 0.01,
+        "p_min": 0.15,
+        "p_max": 0.85,
+        "allowed_strengths": "STRONG,MEDIUM",
+        "fast_signals_enabled": True,
+        "fast_mode": "FULL",
+        "fast_window_minutes": 5,
+        "fast_max_themes_per_digest": 2,
+        "fast_max_markets_per_theme": 2,
+    },
+}
+
+
 def _seed_plan(db_session, name: str) -> Plan:
-    seed = next(plan for plan in get_plan_seeds() if plan.name == name)
-    data = seed.as_dict()
+    data = dict(PLAN_SEEDS[name])
     data["created_at"] = datetime.now(timezone.utc)
     plan = Plan(**data)
     db_session.add(plan)
