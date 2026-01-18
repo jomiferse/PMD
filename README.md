@@ -12,36 +12,36 @@ PMD is a read-only analytics service that detects Polymarket mispricings and del
 
 ## Quick start (fresh DB, dev compose)
 
-Note: dev/prod use separate compose files at repo root and separate Dockerfiles under `docker/`.
+Note: Dockerfiles + compose files live under `pmd_infra`. Run docker compose commands from `pmd_infra`.
 
-1) Copy the env file and fill required values:
+1) Copy the env file and fill required values (from `pmd_infra/`):
 
 ```bash
-cp .env.example .env
+cp env/dev.env.example .env
 ```
 
 2) Build and start services:
 
 ```bash
-docker compose -f docker-compose.dev.yml up -d --build
+docker compose -f compose/compose.dev.yml up -d --build
 ```
 
 3) Run migrations:
 
 ```bash
-docker compose -f docker-compose.dev.yml exec api alembic upgrade head
+docker compose -f compose/compose.dev.yml exec api alembic upgrade head
 ```
 
 4) Seed pricing plans (assigns all users to Basic):
 
 ```bash
-docker compose -f docker-compose.dev.yml exec api python -m app.scripts.seed_plans
+docker compose -f compose/compose.dev.yml exec api python -m app.scripts.seed_plans
 ```
 
 5) Create an API key (prints the raw key once):
 
 ```bash
-docker compose -f docker-compose.dev.yml exec api python -m app.scripts.create_api_key --name prod
+docker compose -f compose/compose.dev.yml exec api python -m app.scripts.create_api_key --name prod
 ```
 
 6) Call endpoints:
@@ -71,7 +71,7 @@ Example alert fields (truncated):
 The database is disposable. If you need a clean reset, drop the database and run:
 
 ```bash
-docker compose -f docker-compose.dev.yml exec api alembic upgrade head
+docker compose -f compose/compose.dev.yml exec api alembic upgrade head
 ```
 
 ## Configuration model
@@ -184,37 +184,37 @@ LOG_LEVEL=DEBUG
 Seed plans:
 
 ```bash
-docker compose -f docker-compose.dev.yml exec api python -m app.scripts.seed_plans
+docker compose -f compose/compose.dev.yml exec api python -m app.scripts.seed_plans
 ```
 
 Create or update a plan:
 
 ```bash
-docker compose -f docker-compose.dev.yml exec api python -m app.scripts.create_plan --name pro --max-copilot-per-day 3
+docker compose -f compose/compose.dev.yml exec api python -m app.scripts.create_plan --name pro --max-copilot-per-day 3
 ```
 
 Assign a plan:
 
 ```bash
-docker compose -f docker-compose.dev.yml exec api python -m app.scripts.assign_plan --user Alice --plan-name pro
+docker compose -f compose/compose.dev.yml exec api python -m app.scripts.assign_plan --user Alice --plan-name pro
 ```
 
 Add a user:
 
 ```bash
-docker compose -f docker-compose.dev.yml exec api python -m app.scripts.manage_users add --name "Alice" --chat-id -12345
+docker compose -f compose/compose.dev.yml exec api python -m app.scripts.manage_users add --name "Alice" --chat-id -12345
 ```
 
 Update preferences:
 
 ```bash
-docker compose -f docker-compose.dev.yml exec api python -m app.scripts.manage_users set-pref --user Alice --min-liquidity 50000
+docker compose -f compose/compose.dev.yml exec api python -m app.scripts.manage_users set-pref --user Alice --min-liquidity 50000
 ```
 
 Send a test Telegram message:
 
 ```bash
-docker compose -f docker-compose.dev.yml exec api python -m app.scripts.manage_users test --user Alice
+docker compose -f compose/compose.dev.yml exec api python -m app.scripts.manage_users test --user Alice
 ```
 
 ## AI Copilot (manual execution)
@@ -259,7 +259,7 @@ Each digest run emits a `copilot_run_summary` log with per-user counts and skip 
 Copilot debug harness (dry run):
 
 ```bash
-docker compose -f docker-compose.dev.yml exec api python -m app.scripts.copilot_debug --user-id <uuid> --alert-id <alert_id>
+docker compose -f compose/compose.dev.yml exec api python -m app.scripts.copilot_debug --user-id <uuid> --alert-id <alert_id>
 ```
 
 ## Production deployment
@@ -267,13 +267,13 @@ docker compose -f docker-compose.dev.yml exec api python -m app.scripts.copilot_
 Build and start production services (no source mounts, internal db/redis):
 
 ```bash
-docker compose -f docker-compose.prod.yml up -d --build
+docker compose -f compose/compose.prod.yml --env-file .env up -d --build
 ```
 
 Run migrations as a one-off job:
 
 ```bash
-docker compose -f docker-compose.prod.yml run --rm migrate
+docker compose -f compose/compose.prod.yml --env-file .env run --rm migrate
 ```
 
 Notes:

@@ -1,7 +1,7 @@
 # PMD VPS Deployment (Docker Compose + Caddy)
 
 This runbook deploys the PMD frontend (Next.js) and backend (FastAPI + worker + scheduler)
-on a single VPS with HTTPS via Caddy. Production assets live under `docker/`.
+on a single VPS with HTTPS via Caddy. Production assets live under `pmd_infra/`.
 
 ## Provision the VPS
 
@@ -49,23 +49,24 @@ Create A records:
 
 ## Configure environment
 
-Ensure the frontend repo sits beside the backend repo:
+Ensure the frontend and infra repos sit beside the backend repo:
 
 ```bash
 mkdir -p /srv/pmd-stack
 cd /srv/pmd-stack
 git clone <backend-repo-url> pmd
 git clone <frontend-repo-url> pmd_frontend
-cd pmd
+git clone <infra-repo-url> pmd_infra
+cd pmd_infra
 ```
 
-From the backend repo root (`pmd/`):
+From the infra repo root (`pmd_infra/`):
 
 ```bash
-cp .env.prod.example .env.prod
+cp env/prod.env.example .env
 ```
 
-Fill in all values in `.env.prod`. Notes:
+Fill in all values in `.env`. Notes:
 
 - `NEXT_PUBLIC_*` variables are public and bundled into the frontend.
 - All other secrets (Stripe, Telegram, admin API key, session secret) are server-only.
@@ -78,13 +79,11 @@ Fill in all values in `.env.prod`. Notes:
 ```bash
 mkdir -p backups
 chmod +x scripts/*.sh
-./scripts/preflight.sh
 ./scripts/deploy.sh
 ```
 
-If you want to test Let’s Encrypt staging first, uncomment the staging `acme_ca`
-line in `docker/Caddyfile`, deploy once, then comment it back for production.
-
+If you want to test Let's Encrypt staging first, uncomment the staging `acme_ca`
+line in `caddy/Caddyfile`, deploy once, then comment it back for production.
 ## Updating
 
 ```bash
@@ -97,7 +96,7 @@ This pulls, rebuilds, and restarts services with minimal downtime.
 ## Backups
 
 ```bash
-./scripts/backup_db.sh
+./scripts/backup.sh
 ```
 
 Backups are saved to `backups/` and rotated (last 7 by default).
@@ -107,13 +106,13 @@ Backups are saved to `backups/` and rotated (last 7 by default).
 1) Stop services:
 
 ```bash
-docker compose -f docker/compose.prod.yml --env-file .env.prod down
+docker compose -f compose/compose.prod.yml --env-file .env down
 ```
 
 2) Restore:
 
 ```bash
-cat backups/<file>.sql | docker compose -f docker/compose.prod.yml --env-file .env.prod exec -T postgres psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}"
+cat backups/<file>.sql | docker compose -f compose/compose.prod.yml --env-file .env exec -T postgres psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}"
 ```
 
 3) Start services:
@@ -124,8 +123,8 @@ cat backups/<file>.sql | docker compose -f docker/compose.prod.yml --env-file .e
 
 ## Troubleshooting checklist
 
-- `docker compose -f docker/compose.prod.yml --env-file .env.prod ps`
-- `docker compose -f docker/compose.prod.yml --env-file .env.prod logs --tail=200 proxy`
+- `docker compose -f compose/compose.prod.yml --env-file .env ps`
+- `docker compose -f compose/compose.prod.yml --env-file .env logs --tail=200 proxy`
 - Confirm DNS A records resolve to the VPS IP.
 - Ensure ports 80/443 are open.
-- Run `./scripts/smoke_prod.sh` for health checks.
+- Run `./scripts/deploy.sh` for health checks.

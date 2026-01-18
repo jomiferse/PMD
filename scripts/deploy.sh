@@ -2,8 +2,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-COMPOSE_FILE="${COMPOSE_FILE:-${ROOT_DIR}/docker/compose.prod.yml}"
-ENV_FILE="${ENV_FILE:-${ROOT_DIR}/.env.prod}"
+INFRA_DIR="${INFRA_DIR:-${ROOT_DIR}/../pmd_infra}"
+COMPOSE_FILE="${COMPOSE_FILE:-${INFRA_DIR}/compose/compose.prod.yml}"
+ENV_FILE="${ENV_FILE:-${INFRA_DIR}/.env}"
 
 ENV_FILE="${ENV_FILE}" "${ROOT_DIR}/scripts/preflight.sh"
 

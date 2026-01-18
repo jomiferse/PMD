@@ -2,9 +2,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-COMPOSE_FILE="${COMPOSE_FILE:-${ROOT_DIR}/docker/compose.prod.yml}"
-ENV_FILE="${ENV_FILE:-${ROOT_DIR}/.env.prod}"
-BACKUP_DIR="${BACKUP_DIR:-${ROOT_DIR}/backups}"
+INFRA_DIR="${INFRA_DIR:-${ROOT_DIR}/../pmd_infra}"
+COMPOSE_FILE="${COMPOSE_FILE:-${INFRA_DIR}/compose/compose.prod.yml}"
+ENV_FILE="${ENV_FILE:-${INFRA_DIR}/.env}"
+BACKUP_DIR="${BACKUP_DIR:-${INFRA_DIR}/backups}"
 RETENTION_COUNT="${RETENTION_COUNT:-7}"
 
 mkdir -p "${BACKUP_DIR}"
