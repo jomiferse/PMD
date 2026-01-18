@@ -31,3 +31,5 @@ pgdata/
 backups/
 
 doc
+# Ignore ops docs folder
+/doc/ops/
