@@ -141,6 +141,7 @@ def admin_plans(
         {
             "id": plan.id,
             "name": plan.name,
+            "stripe_price_lookup_key": plan.stripe_price_lookup_key,
             "price_monthly": plan.price_monthly,
             "is_active": plan.is_active,
             "copilot_enabled": plan.copilot_enabled,
@@ -195,6 +196,7 @@ async def admin_upsert_plan(
 
     allowed_fields = {
         "name",
+        "stripe_price_lookup_key",
         "price_monthly",
         "is_active",
         "copilot_enabled",

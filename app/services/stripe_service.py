@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 import hashlib
+import os
 import uuid
 
 from fastapi import HTTPException
@@ -10,7 +11,7 @@ from ..models import Plan, Subscription, User, UserAuth
 from ..settings import settings
 
 
-def _price_by_plan() -> dict[str, str]:
+def _fallback_price_by_plan_name() -> dict[str, str]:
     return {
         "basic": settings.STRIPE_BASIC_PRICE_ID or "",
         "pro": settings.STRIPE_PRO_PRICE_ID or "",
@@ -18,8 +19,31 @@ def _price_by_plan() -> dict[str, str]:
     }
 
 
-def _plan_for_price_id(price_id: str) -> str | None:
-    for plan_name, stored_price in _price_by_plan().items():
+def _lookup_price_id(lookup_key: str | None) -> str | None:
+    if not lookup_key:
+        return None
+    value = getattr(settings, lookup_key, None)
+    if value:
+        return value
+    return os.environ.get(lookup_key)
+
+
+def _resolve_price_id_for_plan(db: Session, plan_name: str) -> str | None:
+    plan = db.query(Plan).filter(Plan.name == plan_name).one_or_none()
+    if plan and plan.stripe_price_lookup_key:
+        resolved = _lookup_price_id(plan.stripe_price_lookup_key)
+        if resolved:
+            return resolved
+    return _fallback_price_by_plan_name().get(plan_name)
+
+
+def _plan_for_price_id(db: Session, price_id: str) -> str | None:
+    rows = db.query(Plan.name, Plan.stripe_price_lookup_key).all()
+    for plan_name, lookup_key in rows:
+        stored_price = _lookup_price_id(lookup_key)
+        if stored_price and stored_price == price_id:
+            return plan_name
+    for plan_name, stored_price in _fallback_price_by_plan_name().items():
         if stored_price and stored_price == price_id:
             return plan_name
     return None
@@ -94,7 +118,7 @@ def _sync_subscription_from_stripe(
     price_id = None
     if items:
         price_id = items[0].get("price", {}).get("id")
-    plan_name = _plan_for_price_id(price_id) if price_id else None
+    plan_name = _plan_for_price_id(db, price_id) if price_id else None
 
     plan = None
     if plan_name:
@@ -152,7 +176,7 @@ def _create_checkout_session(
     raw_plan_id: str,
 ) -> str:
     plan_name = raw_plan_id.strip().lower()
-    price_id = _price_by_plan().get(plan_name)
+    price_id = _resolve_price_id_for_plan(db, plan_name)
     if not price_id:
         raise HTTPException(status_code=400, detail="invalid_plan")
 
