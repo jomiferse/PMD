@@ -9,7 +9,7 @@ from ...db import get_db
 from ...integrations.redis_client import redis_conn
 from ...integrations.rq_queue import q
 from ...models import Alert, MarketSnapshot
-from ...rate_limit import rate_limit
+from ...deps import _require_session_user
 from ...settings import settings
 
 router = APIRouter()
@@ -21,11 +21,13 @@ def health():
 
 
 @router.get("/status")
-def status(request: Request, db: Session = Depends(get_db), api_key=Depends(rate_limit)):
+def status(request: Request, db: Session = Depends(get_db)):
+    user, _ = _require_session_user(request, db)
     cache_key = build_cache_key(
         "status",
         request,
-        tenant_id=api_key.tenant_id,
+        tenant_id=settings.DEFAULT_TENANT_ID,
+        user_id=str(user.user_id),
     )
 
     def _build_payload():

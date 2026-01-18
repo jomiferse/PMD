@@ -1,16 +1,14 @@
-import hashlib
 import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
-from .auth import api_key_auth
 from .db import SessionLocal
-from .models import ApiKey, UserSession
+from .models import UserSession
 from .services.sessions_service import cache_session_user_id, get_cached_session_user_id
 from .integrations.redis_client import redis_conn
 from .settings import settings
@@ -62,26 +60,6 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         return response
 
 
-def rate_limit(request: Request, api_key: ApiKey = Depends(api_key_auth)) -> ApiKey:
-    limit = api_key.rate_limit_per_min or settings.RATE_LIMIT_DEFAULT_PER_MIN
-    if limit <= 0:
-        return api_key
-
-    scope_key = f"api_key_global:{api_key.id}"
-    result = _apply_rate_limit(scope_key, limit, settings.RATE_LIMIT_WINDOW_SECONDS)
-    request.state.rate_limit_scope = "api_key_global"
-    request.state.rate_limit_subject = "api_key"
-    request.state.rate_limit_applied = True
-
-    if not result.allowed:
-        raise HTTPException(
-            status_code=429,
-            detail="Rate limit exceeded",
-            headers={"Retry-After": str(result.retry_after)},
-        )
-    return api_key
-
-
 def _rule_for_request(path: str, method: str) -> tuple[str, int] | None:
     if method == "POST" and path == "/auth/logout":
         return "session_read", settings.RATE_LIMIT_ME_PER_MIN
@@ -107,11 +85,6 @@ def _rule_for_request(path: str, method: str) -> tuple[str, int] | None:
 
 
 def _resolve_scope_identity(request: Request) -> tuple[str, str | None]:
-    api_key_header = (request.headers.get("x-api-key") or "").strip()
-    if api_key_header:
-        digest = hashlib.sha256(api_key_header.encode("utf-8")).hexdigest()
-        return "api_key", digest
-
     token = request.cookies.get(settings.SESSION_COOKIE_NAME)
     user_id = _resolve_session_user_id(token, request=request)
     if user_id:

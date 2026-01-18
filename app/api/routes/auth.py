@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from ...auth import api_key_auth, create_session_token, hash_password, verify_password
+from ...auth import create_session_token, hash_password, verify_password
 from ...cache import build_cache_key, cached_json_response
 from ...core.plans import DEFAULT_PLAN_NAME
 from ...db import get_db
@@ -13,10 +13,8 @@ from ...deps import (
     _get_session_token,
     _get_session_user,
     _normalize_email,
-    _resolve_default_user,
 )
 from ...models import Plan, User, UserAuth, UserSession
-from ...rate_limit import rate_limit
 from ...services.entitlements_service import _build_session_payload
 from ...services.sessions_service import cache_session_user_id, clear_cached_session_user_id
 from ...settings import settings
@@ -78,14 +76,20 @@ def login(payload: LoginPayload, response: Response, db: Session = Depends(get_d
     ttl_seconds = int((expires_at - now_ts).total_seconds())
     cache_session_user_id(token, str(user.user_id), ttl_seconds)
 
+    secure = settings.SESSION_COOKIE_SECURE
+    if secure is None:
+        secure = settings.ENV.lower() in {"prod", "production"}
+    if settings.SESSION_COOKIE_SAMESITE.lower() == "none":
+        secure = True
     response.set_cookie(
         settings.SESSION_COOKIE_NAME,
         token,
         httponly=True,
-        secure=settings.ENV == "prod",
-        samesite="lax",
+        secure=secure,
+        samesite=settings.SESSION_COOKIE_SAMESITE,
         max_age=int(timedelta(days=settings.SESSION_TTL_DAYS).total_seconds()),
         path="/",
+        domain=settings.SESSION_COOKIE_DOMAIN,
     )
     return {"ok": True}
 
@@ -98,48 +102,16 @@ def logout(request: Request, response: Response, db: Session = Depends(get_db)):
         session.revoked_at = datetime.now(timezone.utc)
         db.commit()
     clear_cached_session_user_id(token)
-    response.delete_cookie(settings.SESSION_COOKIE_NAME, path="/")
+    response.delete_cookie(
+        settings.SESSION_COOKIE_NAME,
+        path="/",
+        domain=settings.SESSION_COOKIE_DOMAIN,
+    )
     return {"ok": True}
 
 
 @router.get("/me")
 def me(request: Request, db: Session = Depends(get_db)):
-    api_key_header = request.headers.get("x-api-key")
-    if api_key_header:
-        api_key = api_key_auth(x_api_key=api_key_header, db=db)
-        rate_limit(request, api_key)
-        cache_key = build_cache_key(
-            "me_api_key",
-            request,
-            tenant_id=api_key.tenant_id,
-            plan_id=api_key.plan,
-        )
-
-        def _build_payload():
-            user = _resolve_default_user(db)
-            if not user:
-                return {
-                    "user_id": None,
-                    "plan": api_key.plan,
-                    "telegram_chat_id": None,
-                    "telegram_pending": False,
-                }
-            plan_name = user.plan.name if user.plan else api_key.plan
-            return {
-                "user_id": str(user.user_id),
-                "plan": plan_name,
-                "telegram_chat_id": user.telegram_chat_id,
-                "telegram_pending": user.telegram_chat_id is None,
-            }
-
-        return cached_json_response(
-            request,
-            cache_key=cache_key,
-            ttl_seconds=settings.CACHE_TTL_ME_SECONDS,
-            fetch_fn=_build_payload,
-            private=True,
-        )
-
     user = _get_session_user(db, _get_session_token(request))
     if not user:
         raise HTTPException(status_code=401, detail="not_authenticated")

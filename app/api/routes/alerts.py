@@ -12,13 +12,11 @@ from ...core.ai_copilot import COPILOT_RUN_KEY
 from ...core.alert_classification import classify_alert_with_snapshots
 from ...core.alerts import _alert_direction, _format_probability_label, _reversal_flag, _sustained_snapshot_count
 from ...core.market_links import attach_market_slugs, market_url
-from ...auth import api_key_auth
 from ...cache import build_cache_key, cached_json_response
 from ...db import get_db
-from ...deps import _get_session_token, _get_session_user, _resolve_default_user
+from ...deps import _require_session_user
 from ...integrations.redis_client import redis_conn
-from ...models import AiRecommendation, Alert, AlertDelivery, MarketSnapshot, User
-from ...rate_limit import rate_limit
+from ...models import AiRecommendation, Alert, AlertDelivery, MarketSnapshot
 from ...settings import settings
 
 router = APIRouter()
@@ -49,16 +47,8 @@ def _parse_history_range(value: str | None) -> int:
     raise HTTPException(status_code=400, detail="invalid_range")
 
 
-def _resolve_request_auth(request: Request, db: Session) -> tuple[str, uuid.UUID | None]:
-    api_key_header = (request.headers.get("x-api-key") or "").strip()
-    if api_key_header:
-        api_key = api_key_auth(x_api_key=api_key_header, db=db)
-        rate_limit(request, api_key)
-        return api_key.tenant_id, None
-
-    user = _get_session_user(db, _get_session_token(request))
-    if not user:
-        raise HTTPException(status_code=401, detail="not_authenticated")
+def _require_session_context(request: Request, db: Session) -> tuple[str, uuid.UUID]:
+    user, _ = _require_session_user(request, db)
     return settings.DEFAULT_TENANT_ID, user.user_id
 
 
@@ -71,30 +61,11 @@ def alerts_latest(
     strength: str | None = None,
     category: str | None = None,
     copilot: str | None = None,
-    user_id: str | None = None,
     cursor: str | None = None,
     paginate: str | None = None,
     include_total: str | None = None,
 ):
-    tenant_id, session_user_id = _resolve_request_auth(request, db)
-    resolved_user_id: uuid.UUID | None = None
-    resolved_user = None
-    if session_user_id:
-        resolved_user_id = session_user_id
-    elif user_id:
-        try:
-            resolved_user_id = uuid.UUID(user_id)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="invalid_user_id")
-    if resolved_user_id is None:
-        resolved_user = (
-            db.query(User)
-            .filter(User.is_active.is_(True))
-            .order_by(User.created_at.desc())
-            .first()
-        )
-        if resolved_user:
-            resolved_user_id = resolved_user.user_id
+    tenant_id, resolved_user_id = _require_session_context(request, db)
 
     cache_key = build_cache_key(
         "alerts_latest",
@@ -255,7 +226,7 @@ def alert_history(
     db: Session = Depends(get_db),
     range: str | None = "24h",
 ):
-    tenant_id, _ = _resolve_request_auth(request, db)
+    tenant_id, _ = _require_session_context(request, db)
     cache_key = build_cache_key(
         "alert_history",
         request,
@@ -353,27 +324,11 @@ def copilot_recommendations(
     strength: str | None = None,
     category: str | None = None,
     copilot: str | None = None,
-    user_id: str | None = None,
     cursor: str | None = None,
     paginate: str | None = None,
     include_total: str | None = None,
 ):
-    tenant_id, session_user_id = _resolve_request_auth(request, db)
-    resolved_user_id: uuid.UUID | None = None
-    if session_user_id:
-        resolved_user_id = session_user_id
-    elif user_id:
-        try:
-            resolved_user_id = uuid.UUID(user_id)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="invalid_user_id")
-    if resolved_user_id is None:
-        resolved_user = _resolve_default_user(db)
-        if resolved_user:
-            resolved_user_id = resolved_user.user_id
-
-    if resolved_user_id is None:
-        return {"items": [], "next_cursor": None, "total": 0} if (paginate or cursor) else []
+    tenant_id, resolved_user_id = _require_session_context(request, db)
 
     cache_key = build_cache_key(
         "copilot_recommendations",
@@ -533,19 +488,19 @@ def copilot_recommendations(
 def alerts_summary(
     request: Request,
     db: Session = Depends(get_db),
-    api_key=Depends(rate_limit),
 ):
+    tenant_id, _ = _require_session_context(request, db)
     cache_key = build_cache_key(
         "alerts_summary",
         request,
-        tenant_id=api_key.tenant_id,
+        tenant_id=tenant_id,
     )
 
     def _build_payload():
         since = datetime.now(timezone.utc) - timedelta(hours=24)
         rows = (
             db.query(Alert.alert_type, func.count())
-            .filter(Alert.tenant_id == api_key.tenant_id, Alert.created_at >= since)
+            .filter(Alert.tenant_id == tenant_id, Alert.created_at >= since)
             .group_by(Alert.alert_type)
             .all()
         )
@@ -562,15 +517,16 @@ def alerts_summary(
 
 
 @router.get("/alerts/last-digest")
-def alerts_last_digest(request: Request, api_key=Depends(rate_limit)):
+def alerts_last_digest(request: Request, db: Session = Depends(get_db)):
+    tenant_id, _ = _require_session_context(request, db)
     cache_key = build_cache_key(
         "alerts_last_digest",
         request,
-        tenant_id=api_key.tenant_id,
+        tenant_id=tenant_id,
     )
 
     def _build_payload():
-        key = LAST_DIGEST_KEY.format(tenant_id=api_key.tenant_id)
+        key = LAST_DIGEST_KEY.format(tenant_id=tenant_id)
         payload = redis_conn.get(key)
         if not payload:
             return {"last_digest": None}
@@ -593,21 +549,8 @@ def copilot_runs(
     request: Request,
     db: Session = Depends(get_db),
     limit: int = 20,
-    user_id: str | None = None,
 ):
-    _, session_user_id = _resolve_request_auth(request, db)
-    resolved_user_id: uuid.UUID | None = None
-    if session_user_id:
-        resolved_user_id = session_user_id
-    elif user_id:
-        try:
-            resolved_user_id = uuid.UUID(user_id)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="invalid_user_id")
-    if resolved_user_id is None:
-        resolved_user = _resolve_default_user(db)
-        if resolved_user:
-            resolved_user_id = resolved_user.user_id
+    _, resolved_user_id = _require_session_context(request, db)
 
     cache_key = build_cache_key(
         "copilot_runs",

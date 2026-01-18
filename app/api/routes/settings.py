@@ -1,5 +1,4 @@
 from typing import Any
-import json
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -41,7 +40,6 @@ def _strengths_to_list(value: str | None) -> list[str]:
 
 class SettingsPatch(BaseModel):
     copilot_enabled: bool | None = None
-    developer_mode: bool | None = None
     min_liquidity: float | None = None
     min_volume_24h: float | None = None
     min_abs_price_move: float | None = None
@@ -122,7 +120,6 @@ def settings_me(request: Request, db: Session = Depends(get_db)):
             "user_id": str(user.user_id),
             "user": {
                 "copilot_enabled": bool(getattr(user, "copilot_enabled", False)),
-                "developer_mode": _get_developer_mode(user),
             },
             "preferences": _build_preferences_payload(pref),
             "effective": _build_effective_payload(effective),
@@ -270,8 +267,6 @@ async def settings_update(
 
     if "copilot_enabled" in provided:
         user.copilot_enabled = bool(provided["copilot_enabled"])
-    if "developer_mode" in provided:
-        _set_developer_mode(user, provided.get("developer_mode"))
 
     if pref is None:
         pref = UserAlertPreference(user_id=uuid.UUID(str(user.user_id)))
@@ -314,36 +309,8 @@ async def settings_update(
         "user_id": str(user.user_id),
         "user": {
             "copilot_enabled": bool(getattr(user, "copilot_enabled", False)),
-            "developer_mode": _get_developer_mode(user),
         },
         "preferences": _build_preferences_payload(refreshed_pref),
         "effective": _build_effective_payload(effective),
         "baseline": _build_effective_payload(baseline),
     }
-def _load_overrides(user) -> dict:
-    raw = getattr(user, "overrides_json", None)
-    if not raw:
-        return {}
-    if isinstance(raw, dict):
-        return dict(raw)
-    if isinstance(raw, str):
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            return {}
-        return dict(parsed) if isinstance(parsed, dict) else {}
-    return {}
-
-
-def _get_developer_mode(user) -> bool:
-    overrides = _load_overrides(user)
-    return bool(overrides.get("developer_mode", False))
-
-
-def _set_developer_mode(user, value: bool | None) -> None:
-    overrides = _load_overrides(user)
-    if value is None:
-        overrides.pop("developer_mode", None)
-    else:
-        overrides["developer_mode"] = bool(value)
-    user.overrides_json = overrides or None

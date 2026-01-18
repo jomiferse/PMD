@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     APP_URL: str = "http://localhost:3000"
     SESSION_SECRET: str = "change-me"
     SESSION_COOKIE_NAME: str = "pmd_session"
+    SESSION_COOKIE_DOMAIN: str | None = None
+    SESSION_COOKIE_SAMESITE: str = "lax"
+    SESSION_COOKIE_SECURE: bool | None = None
     SESSION_TTL_DAYS: int = 14
 
     STRIPE_SECRET_KEY: str | None = None
@@ -62,6 +65,7 @@ class Settings(BaseSettings):
     EXECUTION_ENABLED: bool = False
 
     ADMIN_API_KEY: str | None = None
+    ENABLE_DEVELOPER_API_KEYS: bool = False
     OPENAI_API_KEY: str | None = None
     LLM_API_BASE: str = "https://api.openai.com/v1/chat/completions"
     LLM_MODEL: str = "gpt-4o-mini"
