@@ -106,6 +106,7 @@ class Plan(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    stripe_price_lookup_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     price_monthly: Mapped[float | None] = mapped_column(Float, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     copilot_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
