@@ -1,16 +1,16 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from starlette.requests import Request
 
-from app.auth import hash_api_key
 from app.core.snapshots import backfill_market_p_no
 from app.db import Base
 from app.jobs.tasks import _build_snapshot_row
-from app.models import Alert, ApiKey, MarketSnapshot
+from app.models import Alert, MarketSnapshot, User, UserSession
 from app.polymarket.schemas import PolymarketMarket
 from app.settings import settings
 from app.api.routes.alerts import alert_history
@@ -28,14 +28,15 @@ def db_session():
         session.close()
 
 
-def _make_request(api_key: str, *, path: str, query: str | None = None) -> Request:
+def _make_request(session_token: str, *, path: str, query: str | None = None) -> Request:
+    cookie = f"{settings.SESSION_COOKIE_NAME}={session_token}".encode()
     scope = {
         "type": "http",
         "method": "GET",
         "scheme": "http",
         "path": path,
         "query_string": query.encode() if query else b"",
-        "headers": [(b"x-api-key", api_key.encode())],
+        "headers": [(b"cookie", cookie)],
         "server": ("testserver", 80),
         "client": ("testclient", 123),
     }
@@ -132,11 +133,13 @@ def test_build_snapshot_row_sets_derived_p_no():
 
 def test_alert_history_includes_p_no(db_session):
     now_ts = datetime.now(timezone.utc)
-    api_key_raw = "test-key"
-    api_key = ApiKey(
-        tenant_id=settings.DEFAULT_TENANT_ID,
-        name="test",
-        key_hash=hash_api_key(api_key_raw),
+    user_id = uuid4()
+    session_token = "test-session-token"
+    user = User(user_id=user_id, name="Test User", is_active=True)
+    session = UserSession(
+        token=session_token,
+        user_id=user_id,
+        expires_at=now_ts + timedelta(days=1),
     )
     alert = Alert(
         tenant_id=settings.DEFAULT_TENANT_ID,
@@ -163,12 +166,12 @@ def test_alert_history_includes_p_no(db_session):
         snapshot_bucket=now_ts,
         asof_ts=now_ts,
     )
-    db_session.add_all([api_key, alert, snapshot])
+    db_session.add_all([user, session, alert, snapshot])
     db_session.commit()
 
     response = alert_history(
         alert.id,
-        _make_request(api_key_raw, path=f"/alerts/{alert.id}/history", query="range=1h"),
+        _make_request(session_token, path=f"/alerts/{alert.id}/history", query="range=1h"),
         db_session,
         range="1h",
     )

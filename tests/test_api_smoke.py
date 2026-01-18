@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import json
 import time
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -12,7 +13,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.db import Base, get_db
 from app.main import app
-from app.models import Plan, User
+from app.models import Plan, User, UserSession
 from app.settings import settings
 
 
@@ -65,6 +66,31 @@ def test_health_ok(client):
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"ok": True}
+
+
+def test_session_auth_for_dashboard_endpoints(client, db_session):
+    user = User(user_id=uuid4(), name="Session User", telegram_chat_id=None, overrides_json={})
+    session = UserSession(
+        token="session-token",
+        user_id=user.user_id,
+        expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+    )
+    db_session.add_all([user, session])
+    db_session.commit()
+
+    client.cookies.set(settings.SESSION_COOKIE_NAME, session.token)
+
+    response = client.get("/me")
+    assert response.status_code == 200
+
+    response = client.get("/alerts/latest")
+    assert response.status_code == 200
+
+    response = client.get("/alerts/summary")
+    assert response.status_code == 200
+
+    response = client.get("/copilot/runs")
+    assert response.status_code == 200
 
 
 def test_checkout_session_returns_url(client, monkeypatch):
