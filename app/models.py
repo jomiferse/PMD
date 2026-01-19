@@ -76,7 +76,7 @@ class MarketSnapshot(Base):
     asof_ts: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True),
         default=func.now(),
-        server_default=text("now()"),
+        server_default=text("CURRENT_TIMESTAMP"),
         index=True,
     )
     expires_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -170,12 +170,12 @@ class Alert(Base):
     triggered_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True),
         default=func.now(),
-        server_default=text("now()"),
+        server_default=text("CURRENT_TIMESTAMP"),
     )
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True),
         default=func.now(),
-        server_default=text("now()"),
+        server_default=text("CURRENT_TIMESTAMP"),
     )
     expires_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -290,7 +290,7 @@ class Plan(Base):
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True),
         default=func.now(),
-        server_default=text("now()"),
+        server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
 
@@ -314,7 +314,7 @@ class User(Base):
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True),
         default=func.now(),
-        server_default=text("now()"),
+        server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
 
@@ -339,7 +339,7 @@ class UserAuth(Base):
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True),
         default=func.now(),
-        server_default=text("now()"),
+        server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
 
@@ -366,7 +366,7 @@ class UserSession(Base):
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True),
         default=func.now(),
-        server_default=text("now()"),
+        server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
     expires_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -404,14 +404,14 @@ class Subscription(Base):
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True),
         default=func.now(),
-        server_default=text("now()"),
+        server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
     updated_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True),
         default=func.now(),
         onupdate=func.now(),
-        server_default=text("now()"),
+        server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
 
@@ -426,7 +426,7 @@ class StripeEvent(Base):
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True),
         default=func.now(),
-        server_default=text("now()"),
+        server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
 
@@ -519,7 +519,7 @@ class UserAlertPreference(Base):
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True),
         default=func.now(),
-        server_default=text("now()"),
+        server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
 
@@ -547,7 +547,7 @@ class AlertDelivery(Base):
     delivered_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True),
         default=func.now(),
-        server_default=text("now()"),
+        server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
     expires_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -594,7 +594,7 @@ class AiRecommendation(Base):
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True),
         default=func.now(),
-        server_default=text("now()"),
+        server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
     recommendation: Mapped[str] = mapped_column(String(8), nullable=False)
@@ -624,7 +624,7 @@ class AiMarketMute(Base):
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True),
         default=func.now(),
-        server_default=text("now()"),
+        server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
 
@@ -647,7 +647,7 @@ class AiThemeMute(Base):
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True),
         default=func.now(),
-        server_default=text("now()"),
+        server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
 
@@ -677,6 +677,6 @@ class AiRecommendationEvent(Base):
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True),
         default=func.now(),
-        server_default=text("now()"),
+        server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )

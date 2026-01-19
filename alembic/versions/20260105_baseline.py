@@ -291,7 +291,7 @@ def upgrade() -> None:
             "created_at",
             sa.DateTime(timezone=True),
             nullable=False,
-            server_default=sa.text("now()"),
+            server_default=sa.text("CURRENT_TIMESTAMP"),
         ),
         sa.UniqueConstraint("name", name="uq_plans_name"),
         sa.CheckConstraint(
@@ -389,7 +389,7 @@ def upgrade() -> None:
             "created_at",
             sa.DateTime(timezone=True),
             nullable=False,
-            server_default=sa.text("now()"),
+            server_default=sa.text("CURRENT_TIMESTAMP"),
         ),
         sa.UniqueConstraint("telegram_chat_id", name="uq_users_telegram_chat_id"),
     )
@@ -413,7 +413,7 @@ def upgrade() -> None:
         ),
         sa.Column("email", sa.String(length=320), nullable=False),
         sa.Column("password_hash", sa.String(length=256), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
         sa.UniqueConstraint("email", name="uq_user_auth_email"),
     )
     op.create_index("ix_user_auth_email", "user_auth", ["email"])
@@ -427,7 +427,7 @@ def upgrade() -> None:
             sa.ForeignKey("users.user_id", ondelete="CASCADE"),
             nullable=False,
         ),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
         sa.CheckConstraint(
@@ -452,8 +452,8 @@ def upgrade() -> None:
         sa.Column("current_period_end", sa.DateTime(timezone=True), nullable=True),
         sa.Column("stripe_customer_id", sa.String(length=128), nullable=True),
         sa.Column("stripe_subscription_id", sa.String(length=128), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
         sa.UniqueConstraint(
             "stripe_subscription_id",
             name="uq_subscriptions_stripe_subscription_id",
@@ -469,7 +469,7 @@ def upgrade() -> None:
     op.create_table(
         "stripe_events",
         sa.Column("event_id", sa.String(length=128), primary_key=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
     )
 
     op.create_table(
@@ -498,7 +498,7 @@ def upgrade() -> None:
             "created_at",
             sa.DateTime(timezone=True),
             nullable=False,
-            server_default=sa.text("now()"),
+            server_default=sa.text("CURRENT_TIMESTAMP"),
         ),
         sa.CheckConstraint(
             "min_liquidity IS NULL OR min_liquidity >= 0",
@@ -582,7 +582,7 @@ def upgrade() -> None:
         sa.Column("edge", sa.Float(), nullable=False),
         sa.Column("source_ts", sa.DateTime(timezone=True), nullable=True),
         sa.Column("snapshot_bucket", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("asof_ts", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
+        sa.Column("asof_ts", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
         sa.UniqueConstraint("market_id", "snapshot_bucket", name="uq_market_bucket"),
         sa.CheckConstraint(
@@ -656,13 +656,13 @@ def upgrade() -> None:
             "triggered_at",
             sa.DateTime(timezone=True),
             nullable=False,
-            server_default=sa.text("now()"),
+            server_default=sa.text("CURRENT_TIMESTAMP"),
         ),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
             nullable=False,
-            server_default=sa.text("now()"),
+            server_default=sa.text("CURRENT_TIMESTAMP"),
         ),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
         sa.UniqueConstraint(
@@ -747,7 +747,7 @@ def upgrade() -> None:
             "delivered_at",
             sa.DateTime(timezone=True),
             nullable=False,
-            server_default=sa.text("now()"),
+            server_default=sa.text("CURRENT_TIMESTAMP"),
         ),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("delivery_status", sa.String(length=16), nullable=False),
@@ -793,7 +793,7 @@ def upgrade() -> None:
             sa.ForeignKey("alerts.id", ondelete="CASCADE"),
             nullable=False,
         ),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
         sa.Column("recommendation", sa.String(length=8), nullable=False),
         sa.Column("confidence", sa.String(length=8), nullable=False),
         sa.Column("rationale", sa.Text(), nullable=False),
@@ -845,7 +845,7 @@ def upgrade() -> None:
             "created_at",
             sa.DateTime(timezone=True),
             nullable=False,
-            server_default=sa.text("now()"),
+            server_default=sa.text("CURRENT_TIMESTAMP"),
         ),
         sa.UniqueConstraint("user_id", "market_id", name="uq_ai_market_mutes_user_market"),
     )
@@ -866,7 +866,7 @@ def upgrade() -> None:
             "created_at",
             sa.DateTime(timezone=True),
             nullable=False,
-            server_default=sa.text("now()"),
+            server_default=sa.text("CURRENT_TIMESTAMP"),
         ),
         sa.UniqueConstraint("user_id", "theme_key", name="uq_ai_theme_mutes_user_theme"),
     )
@@ -899,7 +899,7 @@ def upgrade() -> None:
             "created_at",
             sa.DateTime(timezone=True),
             nullable=False,
-            server_default=sa.text("now()"),
+            server_default=sa.text("CURRENT_TIMESTAMP"),
         ),
     )
     op.create_index(
