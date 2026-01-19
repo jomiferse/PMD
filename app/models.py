@@ -489,11 +489,11 @@ class UserAlertPreference(Base):
         ),
         CheckConstraint(
             "fast_max_themes_per_digest IS NULL OR fast_max_themes_per_digest >= 0",
-            name="ck_user_alert_preferences_fast_max_themes_per_digest_non_negative",
+            name="ck_uap_fast_max_themes_nonneg",
         ),
         CheckConstraint(
             "fast_max_markets_per_theme IS NULL OR fast_max_markets_per_theme >= 0",
-            name="ck_user_alert_preferences_fast_max_markets_per_theme_non_negative",
+            name="ck_uap_fast_max_markets_nonneg",
         ),
     )
 

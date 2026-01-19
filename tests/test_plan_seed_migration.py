@@ -14,9 +14,9 @@ def _load_seed_migration():
         Path(__file__).resolve().parents[1]
         / "alembic"
         / "versions"
-        / "20260118_seed_plans.py"
+        / "20260105_baseline.py"
     )
-    spec = spec_from_file_location("seed_plans_migration", migration_path)
+    spec = spec_from_file_location("baseline_migration", migration_path)
     if spec is None or spec.loader is None:
         raise RuntimeError("failed to load seed migration module")
     module = module_from_spec(spec)
