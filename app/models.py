@@ -40,12 +40,11 @@ class MarketSnapshot(Base):
         ),
         Index("ix_market_snapshots_bucket", "snapshot_bucket"),
         Index("ix_market_snapshots_market_asof", "market_id", "asof_ts"),
-        Index("ix_market_snapshots_market_bucket", "market_id", "snapshot_bucket"),
         Index("ix_market_snapshots_asof_desc", text("asof_ts DESC")),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    market_id: Mapped[str] = mapped_column(String(128), index=True)
+    market_id: Mapped[str] = mapped_column(String(128))
     title: Mapped[str] = mapped_column(String(512))
     category: Mapped[str] = mapped_column(String(128), default="unknown")
     slug: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -118,9 +117,26 @@ class Alert(Base):
         ),
         Index("ix_alerts_created_at", "created_at"),
         Index("ix_alerts_tenant_type", "tenant_id", "alert_type"),
-        Index("ix_alerts_tenant_created", "tenant_id", "created_at"),
-        Index("ix_alerts_tenant_strength", "tenant_id", "strength"),
-        Index("ix_alerts_tenant_category", "tenant_id", "category"),
+        Index(
+            "ix_alerts_tenant_created_desc",
+            "tenant_id",
+            text("created_at DESC"),
+            text("id DESC"),
+        ),
+        Index(
+            "ix_alerts_tenant_strength_created_desc",
+            "tenant_id",
+            "strength",
+            text("created_at DESC"),
+            text("id DESC"),
+        ),
+        Index(
+            "ix_alerts_tenant_category_norm_created_desc",
+            "tenant_id",
+            text("lower(category)"),
+            text("created_at DESC"),
+            text("id DESC"),
+        ),
         Index("ix_alerts_cooldown", "tenant_id", "alert_type", "market_id", "triggered_at"),
         Index("ix_alerts_market_triggered", "market_id", "triggered_at"),
     )
@@ -359,7 +375,11 @@ class Subscription(Base):
     __tablename__ = "subscriptions"
     __table_args__ = (
         UniqueConstraint("stripe_subscription_id", name="uq_subscriptions_stripe_subscription_id"),
-        Index("ix_subscriptions_user_id", "user_id"),
+        Index(
+            "ix_subscriptions_user_created_desc",
+            "user_id",
+            text("created_at DESC"),
+        ),
         Index("ix_subscriptions_customer_id", "stripe_customer_id"),
     )
 
@@ -549,7 +569,12 @@ class AiRecommendation(Base):
             name="ck_ai_recommendations_status",
         ),
         Index("ix_ai_recommendations_user_status", "user_id", "status"),
-        Index("ix_ai_recommendations_user_created", "user_id", "created_at"),
+        Index(
+            "ix_ai_recommendations_user_created_desc",
+            "user_id",
+            text("created_at DESC"),
+            text("id DESC"),
+        ),
         Index("ix_ai_recommendations_created_at", "created_at"),
     )
 
