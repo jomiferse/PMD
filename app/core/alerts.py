@@ -63,6 +63,8 @@ DELIVERY_STATUS_SENT = "sent"
 DELIVERY_STATUS_SKIPPED = "skipped"
 DELIVERY_STATUS_FILTERED = "filtered"
 
+_ALERT_DELIVERY_EXPIRES_CACHE: dict[str, bool] = {}
+
 
 @dataclass(frozen=True)
 class UserDigestConfig:
@@ -987,6 +989,26 @@ def _record_fast_digest_sent(user_id: UUID, sent_at: datetime) -> None:
         logger.exception("fast_digest_state_write_failed user_id=%s", user_id)
 
 
+def _alert_deliveries_has_expires_at(db: Session) -> bool:
+    bind = db.get_bind()
+    cache_key = f"{getattr(bind, 'url', '')}:{id(bind)}"
+    cached = _ALERT_DELIVERY_EXPIRES_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    try:
+        cols = inspect(bind).get_columns("alert_deliveries")
+        has_expires = any(col.get("name") == "expires_at" for col in cols)
+    except Exception:
+        has_expires = False
+    _ALERT_DELIVERY_EXPIRES_CACHE[cache_key] = has_expires
+    return has_expires
+
+
+def _delivery_expires_at(delivered_at: datetime) -> datetime:
+    safe_days = max(int(settings.DELIVERY_RETENTION_DAYS), 1)
+    return delivered_at + timedelta(days=safe_days)
+
+
 def _record_alert_deliveries(
     db: Session,
     filtered_alerts: list[Alert],
@@ -1001,28 +1023,36 @@ def _record_alert_deliveries(
     # This prevents CardinalityViolation when same alert appears in both lists
     rows_by_alert: dict[int, dict] = {}
     filter_reasons = filter_reasons or {}
+    include_expires_at = _alert_deliveries_has_expires_at(db)
+    expires_at = _delivery_expires_at(delivered_at) if include_expires_at else None
     for alert in filtered_alerts:
         if alert.id is None:
             continue
-        rows_by_alert[alert.id] = {
+        row = {
             "alert_id": alert.id,
             "user_id": user_id,
             "delivered_at": delivered_at,
             "delivery_status": DELIVERY_STATUS_FILTERED,
             "filter_reasons": filter_reasons.get(alert.id, []),
         }
+        if include_expires_at:
+            row["expires_at"] = expires_at
+        rows_by_alert[alert.id] = row
 
     for alert in included_alerts:
         if alert.id is None:
             continue
         status = DELIVERY_STATUS_SENT if alert.id in sent_alert_ids else DELIVERY_STATUS_SKIPPED
-        rows_by_alert[alert.id] = {
+        row = {
             "alert_id": alert.id,
             "user_id": user_id,
             "delivered_at": delivered_at,
             "delivery_status": status,
             "filter_reasons": filter_reasons.get(alert.id, []),
         }
+        if include_expires_at:
+            row["expires_at"] = expires_at
+        rows_by_alert[alert.id] = row
 
     rows = list(rows_by_alert.values())
     if not rows:
@@ -1032,13 +1062,16 @@ def _record_alert_deliveries(
         logger.debug("digest_delivery_skipped user_id=%s reason=%s", user_id, skip_reason)
 
     stmt = pg_insert(AlertDelivery).values(rows)
+    update_set = {
+        "delivered_at": delivered_at,
+        "delivery_status": stmt.excluded.delivery_status,
+        "filter_reasons": stmt.excluded.filter_reasons,
+    }
+    if include_expires_at:
+        update_set["expires_at"] = expires_at
     stmt = stmt.on_conflict_do_update(
         index_elements=["alert_id", "user_id"],
-        set_={
-            "delivered_at": delivered_at,
-            "delivery_status": stmt.excluded.delivery_status,
-            "filter_reasons": stmt.excluded.filter_reasons,
-        },
+        set_=update_set,
     )
     db.execute(stmt)
     db.commit()

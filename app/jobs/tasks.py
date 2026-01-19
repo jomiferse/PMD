@@ -94,6 +94,7 @@ async def run_ingest_and_alert(db: Session) -> dict:
         )
 
         if alerts:
+            _apply_alert_expiry(alerts, settings.ALERT_RETENTION_DAYS)
             alert_rows = [a.__dict__ for a in alerts]
             for row in alert_rows:
                 row.pop("_sa_instance_state", None)
@@ -129,6 +130,7 @@ async def run_ingest_and_alert(db: Session) -> dict:
                 use_triggered_at=use_triggered_at,
             )
         if fast_alerts:
+            _apply_alert_expiry(fast_alerts, settings.ALERT_RETENTION_DAYS)
             fast_rows = [a.__dict__ for a in fast_alerts]
             for row in fast_rows:
                 row.pop("_sa_instance_state", None)
@@ -190,9 +192,9 @@ def run_cleanup(db: Session) -> dict:
     alerts_cutoff = now_ts - timedelta(days=settings.ALERT_RETENTION_DAYS)
     deliveries_cutoff = now_ts - timedelta(days=settings.DELIVERY_RETENTION_DAYS)
 
-    snapshots_column = _pick_column(db, "market_snapshots", ["asof_ts", "source_ts"])
-    alerts_column = _pick_column(db, "alerts", ["triggered_at", "created_at"])
-    deliveries_column = _pick_column(db, "alert_deliveries", ["delivered_at", "created_at"])
+    snapshots_column = _pick_column(db, "market_snapshots", ["expires_at", "asof_ts", "source_ts"])
+    alerts_column = _pick_column(db, "alerts", ["expires_at", "triggered_at", "created_at"])
+    deliveries_column = _pick_column(db, "alert_deliveries", ["expires_at", "delivered_at"])
 
     deleted_snapshots = 0
     deleted_alerts = 0
@@ -283,6 +285,24 @@ def _snapshot_bucket(ts: datetime) -> datetime:
     return ts.replace(minute=minute, second=0, microsecond=0)
 
 
+def _retention_expires_at(base_ts: datetime | None, days: int) -> datetime | None:
+    if base_ts is None:
+        return None
+    safe_days = max(int(days), 1)
+    return base_ts + timedelta(days=safe_days)
+
+
+def _apply_alert_expiry(alerts: list[Alert], days: int) -> None:
+    if not alerts:
+        return
+    safe_days = max(int(days), 1)
+    for alert in alerts:
+        base_ts = getattr(alert, "triggered_at", None) or getattr(alert, "created_at", None)
+        if base_ts is None:
+            continue
+        alert.expires_at = base_ts + timedelta(days=safe_days)
+
+
 def _resolve_market_p_no(
     market: PolymarketMarket, market_p_yes: float | None
 ) -> tuple[float | None, bool | None]:
@@ -310,6 +330,7 @@ def _build_snapshot_row(
     source_ts = market.source_ts or started_at
     bucket = _snapshot_bucket(source_ts)
     market_p_no, market_p_no_derived = _resolve_market_p_no(market, s.market_p_yes)
+    expires_at = _retention_expires_at(started_at, settings.SNAPSHOT_RETENTION_DAYS)
 
     row = {
         "market_id": market_id,
@@ -333,6 +354,7 @@ def _build_snapshot_row(
         "source_ts": source_ts,
         "snapshot_bucket": bucket,
         "asof_ts": started_at,
+        "expires_at": expires_at,
     }
 
     if not market_id:
@@ -376,6 +398,7 @@ OPTIONAL_ALERT_COLUMNS = {
     "new_price",
     "delta_pct",
     "triggered_at",
+    "expires_at",
     "strength",
     "mapping_confidence",
     "market_kind",

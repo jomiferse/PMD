@@ -41,6 +41,7 @@ class MarketSnapshot(Base):
         Index("ix_market_snapshots_bucket", "snapshot_bucket"),
         Index("ix_market_snapshots_market_asof", "market_id", "asof_ts"),
         Index("ix_market_snapshots_asof_desc", text("asof_ts DESC")),
+        Index("ix_market_snapshots_expires_at", "expires_at"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -78,6 +79,7 @@ class MarketSnapshot(Base):
         server_default=text("now()"),
         index=True,
     )
+    expires_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class Alert(Base):
@@ -116,6 +118,7 @@ class Alert(Base):
             name="ck_alerts_mapping_confidence",
         ),
         Index("ix_alerts_created_at", "created_at"),
+        Index("ix_alerts_expires_at", "expires_at"),
         Index("ix_alerts_tenant_type", "tenant_id", "alert_type"),
         Index(
             "ix_alerts_tenant_created_desc",
@@ -174,6 +177,7 @@ class Alert(Base):
         default=func.now(),
         server_default=text("now()"),
     )
+    expires_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class Plan(Base):
@@ -530,6 +534,7 @@ class AlertDelivery(Base):
         ),
         Index("ix_alert_deliveries_user_status", "user_id", "delivery_status"),
         Index("ix_alert_deliveries_delivered_at", "delivered_at"),
+        Index("ix_alert_deliveries_expires_at", "expires_at"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -545,6 +550,7 @@ class AlertDelivery(Base):
         server_default=text("now()"),
         nullable=False,
     )
+    expires_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     delivery_status: Mapped[str] = mapped_column(String(16), nullable=False)
     filter_reasons: Mapped[list | None] = mapped_column(
         JSON().with_variant(JSONB, "postgresql"),
