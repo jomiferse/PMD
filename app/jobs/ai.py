@@ -7,6 +7,9 @@ from ..db import SessionLocal
 from ..models import Alert, User
 from ..core.ai_copilot import create_ai_recommendation, _complete_copilot_run
 from ..core.user_settings import get_effective_user_settings
+from ..services.entitlements_service import get_active_subscription
+
+logger = logging.getLogger(__name__)
 
 
 def ai_recommendation_job(
@@ -27,6 +30,19 @@ def ai_recommendation_job(
         user = db.query(User).filter(User.user_id == parsed_user_id).one_or_none()
         if not user or not user.is_active:
             return {"ok": False, "reason": "user_inactive"}
+        active_sub, latest_sub = get_active_subscription(
+            db,
+            user_id=parsed_user_id,
+            include_latest=True,
+        )
+        if not active_sub:
+            status = latest_sub.status if latest_sub else None
+            logger.info(
+                "skipped_user_no_plan user_id=%s status=%s reason=no_active_plan",
+                parsed_user_id,
+                status,
+            )
+            return {"ok": False, "reason": "no_active_plan"}
         effective = get_effective_user_settings(user, db=db)
         if not effective.copilot_enabled:
             return {"ok": False, "reason": "ai_disabled"}
@@ -45,7 +61,6 @@ def ai_recommendation_job(
             return {"ok": False, "reason": "no_recommendation"}
         return {"ok": True, "recommendation_id": rec.id}
     except Exception:
-        logger = logging.getLogger(__name__)
         logger.exception("ai_recommendation_job_failed user_id=%s alert_id=%s", user_id, alert_id)
         return {"ok": False, "reason": "exception"}
     finally:

@@ -31,6 +31,7 @@ from .alert_classification import classify_alert_with_snapshots
 from .market_links import attach_market_slugs, market_url
 from .signal_speed import SIGNAL_SPEED_FAST, SIGNAL_SPEED_STANDARD
 from .telegram import send_telegram_message, answer_callback_query, edit_message_reply_markup
+from ..services.entitlements_service import get_active_subscription
 
 logger = logging.getLogger(__name__)
 redis_conn = redis.from_url(settings.REDIS_URL)
@@ -735,6 +736,19 @@ def _send_recommendation_message(
     window_minutes: int | None = None,
 ) -> bool:
     if not user.telegram_chat_id:
+        return False
+    active_sub, latest_sub = get_active_subscription(
+        db,
+        user_id=user.user_id,
+        include_latest=True,
+    )
+    if not active_sub:
+        status = latest_sub.status if latest_sub else None
+        logger.info(
+            "skipped_user_no_plan user_id=%s status=%s reason=no_active_plan",
+            user.user_id,
+            status,
+        )
         return False
     attach_market_slugs(db, [alert])
     text, markup = _format_ai_message(
