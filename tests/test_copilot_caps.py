@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from uuid import uuid4
 
 import pytest
@@ -10,7 +10,7 @@ from app.core.ai_copilot import _send_recommendation_message
 from app.core.alert_classification import AlertClassification
 from app.core.alerts import UserDigestConfig, _enqueue_ai_recommendations
 from app.db import Base
-from app.models import AiRecommendation, Alert, User
+from app.models import AiRecommendation, Alert, Plan, Subscription, User
 from app.settings import settings
 
 
@@ -143,6 +143,21 @@ def _make_config(user_id):
     )
 
 
+def _seed_active_subscription(db_session, user):
+    plan = Plan(name="pro")
+    db_session.add(plan)
+    db_session.flush()
+    user.plan_id = plan.id
+    subscription = Subscription(
+        user_id=user.user_id,
+        plan_id=plan.id,
+        status="active",
+        current_period_end=datetime.now(timezone.utc) + timedelta(days=1),
+    )
+    db_session.add(subscription)
+    db_session.commit()
+
+
 class _FakeResponse:
     def __init__(self, status_code):
         self.status_code = status_code
@@ -180,6 +195,7 @@ def test_copilot_daily_count_increments_on_success(db_session, monkeypatch):
     alert = _make_alert()
     db_session.add_all([user, alert])
     db_session.commit()
+    _seed_active_subscription(db_session, user)
 
     rec = AiRecommendation(
         user_id=user.user_id,
@@ -223,6 +239,7 @@ def test_copilot_daily_count_skips_on_failure(db_session, monkeypatch):
     alert = _make_alert()
     db_session.add_all([user, alert])
     db_session.commit()
+    _seed_active_subscription(db_session, user)
 
     rec = AiRecommendation(
         user_id=user.user_id,
@@ -347,6 +364,7 @@ def test_copilot_daily_key_is_date_scoped(db_session, monkeypatch):
     alert = _make_alert()
     db_session.add_all([user, alert])
     db_session.commit()
+    _seed_active_subscription(db_session, user)
 
     rec = AiRecommendation(
         user_id=user.user_id,
