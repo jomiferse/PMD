@@ -17,6 +17,7 @@ from ...db import get_db
 from ...deps import _require_session_user
 from ...integrations.redis_client import redis_conn
 from ...models import AiRecommendation, Alert, AlertDelivery, MarketSnapshot
+from ...services.entitlements_service import get_active_subscription
 from ...settings import settings
 
 router = APIRouter()
@@ -75,6 +76,11 @@ def alerts_latest(
     )
 
     def _build_payload():
+        if resolved_user_id and not get_active_subscription(db, user_id=resolved_user_id):
+            total_count = 0 if include_total else None
+            if paginate or cursor:
+                return {"items": [], "next_cursor": None, "total": total_count}
+            return []
         now_ts = datetime.now(timezone.utc)
         window_start = now_ts - timedelta(minutes=max(window_minutes, 1))
         query = db.query(Alert).filter(
@@ -338,6 +344,11 @@ def copilot_recommendations(
     )
 
     def _build_payload():
+        if not get_active_subscription(db, user_id=resolved_user_id):
+            total_count = 0 if include_total else None
+            if paginate or cursor:
+                return {"items": [], "next_cursor": None, "total": total_count}
+            return []
         now_ts = datetime.now(timezone.utc)
         window_start = now_ts - timedelta(minutes=max(window_minutes, 1))
 

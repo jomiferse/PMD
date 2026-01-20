@@ -40,6 +40,7 @@ from .fast_signals import FAST_ALERT_TYPE
 from .market_links import attach_market_slugs, market_url
 from .plans import upgrade_target_name
 from .signal_speed import SIGNAL_SPEED_FAST, SIGNAL_SPEED_STANDARD, classify_signal_speed
+from ..services.entitlements_service import get_active_subscription
 
 logger = logging.getLogger(__name__)
 redis_conn = redis.from_url(settings.REDIS_URL)
@@ -232,10 +233,28 @@ async def send_user_digests(db: Session, tenant_id: str) -> dict | None:
     if not users:
         return {"ok": True, "users": 0, "sent": 0}
 
+    active_subs, latest_subs = get_active_subscription(
+        db,
+        user_ids=[user.user_id for user in users],
+        include_latest=True,
+    )
     prefs = _load_user_preferences(db, users)
     results = []
     sent_count = 0
+    skipped_no_plan = 0
     for user in users:
+        if user.user_id not in active_subs:
+            latest = latest_subs.get(user.user_id) if latest_subs else None
+            status = latest.status if latest else None
+            current_period_end = latest.current_period_end.isoformat() if latest and latest.current_period_end else None
+            logger.info(
+                "skipped_user_no_plan user_id=%s status=%s current_period_end=%s reason=no_active_plan",
+                user.user_id,
+                status,
+                current_period_end,
+            )
+            skipped_no_plan += 1
+            continue
         config = _resolve_user_preferences(user, prefs.get(user.user_id), db=db)
         now_ts = datetime.now(timezone.utc)
         fast_payload, _ = _prepare_fast_digest(
@@ -265,7 +284,20 @@ async def send_user_digests(db: Session, tenant_id: str) -> dict | None:
         if result.get("sent"):
             sent_count += 1
 
-    return {"ok": True, "users": len(users), "sent": sent_count, "results": results}
+    if skipped_no_plan:
+        logger.info(
+            "skipped_users_no_plan count=%s total_users=%s",
+            skipped_no_plan,
+            len(users),
+        )
+
+    return {
+        "ok": True,
+        "users": len(users),
+        "sent": sent_count,
+        "skipped_no_plan": skipped_no_plan,
+        "results": results,
+    }
 
 
 def _load_user_preferences(
