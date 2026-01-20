@@ -1,9 +1,12 @@
+from datetime import datetime, timezone
+from typing import Iterable
+import uuid
+
 from sqlalchemy.orm import Session
 
 from ..core.effective_settings import EffectiveSettings, resolve_effective_settings
 from ..core.plans import upgrade_target_name
-from ..models import Plan, User, UserAuth
-from .stripe_service import _get_latest_subscription, _is_active_status, _refresh_subscription_from_stripe
+from ..models import Plan, Subscription, User, UserAuth
 
 
 def _build_entitlements(plan: Plan | None) -> dict[str, object]:
@@ -75,6 +78,8 @@ def build_settings_entitlements(user: User) -> dict[str, object]:
 
 
 def _build_session_payload(db: Session, user: User) -> dict[str, object]:
+    from .stripe_service import _get_latest_subscription, _refresh_subscription_from_stripe
+
     auth = db.query(UserAuth).filter(UserAuth.user_id == user.user_id).one_or_none()
     subscription = _get_latest_subscription(db, user.user_id)
     plan = subscription.plan if subscription else None
@@ -107,3 +112,56 @@ def _build_session_payload(db: Session, user: User) -> dict[str, object]:
         "subscription": subscription_payload,
         "entitlements": _build_entitlements(plan),
     }
+
+
+def _is_active_status(status: str | None) -> bool:
+    return status in {"active", "trialing"}
+
+
+def get_active_subscription(
+    db: Session,
+    *,
+    user_id: uuid.UUID | None = None,
+    user_ids: Iterable[uuid.UUID] | None = None,
+    include_latest: bool = False,
+):
+    if user_id is None and user_ids is None:
+        return None
+    if user_ids is not None:
+        ids = [value for value in user_ids if value is not None]
+    else:
+        ids = [user_id] if user_id is not None else []
+    if not ids:
+        return {} if user_ids is not None else None
+
+    rows = (
+        db.query(Subscription)
+        .filter(Subscription.user_id.in_(ids))
+        .order_by(Subscription.user_id.asc(), Subscription.created_at.desc())
+        .all()
+    )
+    latest_by_user: dict[uuid.UUID, Subscription] = {}
+    for subscription in rows:
+        if subscription.user_id not in latest_by_user:
+            latest_by_user[subscription.user_id] = subscription
+
+    now_ts = datetime.now(timezone.utc)
+    active_by_user: dict[uuid.UUID, Subscription] = {}
+    for latest_user_id, subscription in latest_by_user.items():
+        if not _is_active_status(subscription.status):
+            continue
+        current_period_end = subscription.current_period_end
+        if current_period_end is not None:
+            if current_period_end.tzinfo is None:
+                current_period_end = current_period_end.replace(tzinfo=timezone.utc)
+            if current_period_end < now_ts:
+                continue
+        active_by_user[latest_user_id] = subscription
+
+    if include_latest:
+        if user_id is not None and user_ids is None:
+            return active_by_user.get(user_id), latest_by_user.get(user_id)
+        return active_by_user, latest_by_user
+    if user_id is not None and user_ids is None:
+        return active_by_user.get(user_id)
+    return active_by_user
